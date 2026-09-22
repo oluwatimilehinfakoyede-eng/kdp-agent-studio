@@ -9,38 +9,50 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError
+from groq import Groq
 
 load_dotenv()
 
-# Initialize Gemini Client
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+# Initialize API Clients
+gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-# 4-Stage Gemini 3.x Flash waterfall
-MODELS_WATERFALL = [
+# Dual Gemini Flash primary tier
+GEMINI_MODELS = [
     "gemini-3.8-flash",
-    "gemini-3.7-flash",
-    "gemini-3.6-flash",
-    "gemini-3.5-flash"
+    "gemini-3.7-flash"
 ]
 
-def call_gemini(prompt: str, system_prompt: str = "") -> str:
+def call_groq_fallback(prompt: str, system_prompt: str = "") -> str:
+    """Zero-cost terminal fallback executing Llama 3.3 70B on Groq LPUs."""
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+
+    chat_completion = groq_client.chat.completions.create(
+        messages=messages,
+        model="llama-3.3-70b-versatile",
+        temperature=0.7,
+    )
+    return chat_completion.choices[0].message.content
+
+
+def call_llm(prompt: str, system_prompt: str = "") -> str:
     """
-    Executes prompt across the 4 Flash models with dynamic 503 surge backoff.
-    - 503 / UNAVAILABLE: pauses 7-9s on attempt 1, 14-16s on attempt 2 before trying next model.
-    - 429 / RESOURCE_EXHAUSTED: exponential backoff with random jitter.
-    - 404 / NOT_FOUND: immediately advances to the next model.
+    Tiered LLM orchestrator:
+    1. Tries Gemini Flash models with 503 surge backoff.
+    2. Automatically routes to Groq (Llama 3.3 70B) if Google capacity fails.
     """
     config = types.GenerateContentConfig(
         system_instruction=system_prompt if system_prompt else None,
         temperature=0.7,
     )
 
-    last_error = None
-
-    for model_name in MODELS_WATERFALL:
+    for model_name in GEMINI_MODELS:
         for attempt in range(2):
             try:
-                res = client.models.generate_content(
+                res = gemini_client.models.generate_content(
                     model=model_name,
                     contents=prompt,
                     config=config
@@ -48,41 +60,39 @@ def call_gemini(prompt: str, system_prompt: str = "") -> str:
                 if res and res.text:
                     return res.text
             except APIError as e:
-                last_error = e
                 err_str = str(e)
 
-                # 503 / High Demand: Progressive pause to ride out capacity waves before hopping
+                # 503 Surge: Progressive pause to ride out server traffic
                 if "503" in err_str or "UNAVAILABLE" in err_str:
-                    wait_time = (attempt + 1) * 7 + random.uniform(1.0, 3.0)
-                    print(f"[{model_name}] 503 surge (Attempt {attempt + 1}/2). Waiting {wait_time:.1f}s...")
+                    wait_time = (attempt + 1) * 6 + random.uniform(1.0, 2.5)
+                    print(f"[{model_name}] 503 surge. Pausing {wait_time:.1f}s...")
                     time.sleep(wait_time)
                     continue
 
-                # 429 / Rate Limit: Exponential backoff
+                # 429 Quota: Brief backoff
                 elif any(code in err_str for code in ["429", "RESOURCE_EXHAUSTED"]):
-                    sleep_time = (2 ** attempt) * 4 + random.uniform(1.5, 3.0)
-                    print(f"[{model_name}] Rate limited (429). Waiting {sleep_time:.1f}s...")
+                    sleep_time = (attempt + 1) * 4 + random.uniform(1.0, 2.0)
+                    print(f"[{model_name}] Rate limited. Pausing {sleep_time:.1f}s...")
                     time.sleep(sleep_time)
                     continue
-
-                # 404 / Missing endpoint: advance immediately
-                elif "404" in err_str or "NOT_FOUND" in err_str:
-                    print(f"[{model_name}] Model not found. Skipping to next model...")
-                    break
 
                 else:
                     print(f"[{model_name}] API Error: {e}")
                     break
             except Exception as e:
-                last_error = e
-                print(f"[{model_name}] Unexpected error: {e}")
+                print(f"[{model_name}] Error: {e}")
                 break
 
-    raise RuntimeError(f"All 4 Flash models temporarily busy. Please wait 60s and re-run. (Details: {last_error})")
+    # Secondary Cloud Failover
+    print("[FAILOVER] Gemini unavailable. Handing off to Groq (Llama 3.3 70B)...")
+    try:
+        return call_groq_fallback(prompt, system_prompt)
+    except Exception as groq_err:
+        raise RuntimeError(f"All Gemini models and Groq failover failed: {groq_err}")
 
 
 def extract_clean_list(raw_response: str) -> list[str]:
-    """Fault-tolerant JSON and plain text parser for search queries."""
+    """Parses JSON or numbered lists into clean query strings."""
     match = re.search(r"\[\s*[\"'].*?[\"']\s*(?:,\s*[\"'].*?[\"']\s*)*\]", raw_response, re.DOTALL)
     if match:
         try:
@@ -99,13 +109,13 @@ def extract_clean_list(raw_response: str) -> list[str]:
         if cleaned and len(cleaned) > 4 and not cleaned.startswith(("{", "}", "[", "]")):
             extracted.append(cleaned)
 
-    return extracted[:6] if extracted else ["anxiety journal workbook", "somatic exercise guide", "habit building handbook"]
+    return extracted[:6] if extracted else ["somatic therapy journal", "low oxalate diet guide", "habit building handbook"]
 
 
-# --- SALES VELOCITY & METRICS LOGIC ---
+# --- SALES METRICS LOGIC ---
 
 def estimate_daily_sales(bsr: int) -> int:
-    """Converts Amazon Book BSR into realistic daily sales volume."""
+    """Estimates book sales volume from Best Sellers Rank."""
     if bsr <= 0:
         return 0
     elif bsr < 500:
@@ -125,7 +135,7 @@ def estimate_daily_sales(bsr: int) -> int:
 
 
 def compute_comprehensive_score(books: list[dict]) -> dict:
-    """Computes a 100-point KDP Viability Score."""
+    """Generates 100-point KDP viability score from scraped market data."""
     if not books:
         return {
             "total": 68,
@@ -191,13 +201,9 @@ def compute_comprehensive_score(books: list[dict]) -> dict:
 # --- SCOUT AGENT ---
 
 def probe_amazon_suggestions(prefix: str) -> list[str]:
-    """Validates real buyer query volume using Amazon's autocomplete engine."""
+    """Checks query demand against Amazon's live search completion endpoint."""
     url = "https://completion.amazon.com/api/2017/suggestions"
-    params = {
-        "mid": "ATVPDKIKX0DER",
-        "alias": "stripbooks",
-        "prefix": prefix,
-    }
+    params = {"mid": "ATVPDKIKX0DER", "alias": "stripbooks", "prefix": prefix}
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept": "application/json",
@@ -212,7 +218,7 @@ def probe_amazon_suggestions(prefix: str) -> list[str]:
 
 
 def scout_seed_angles(broad_topic: str) -> list[dict]:
-    """Generates 6 natural, high-intent Amazon non-fiction buyer search phrases."""
+    """Generates commercial search phrases and verifies them via Amazon autocomplete."""
     prompt = f"""
     Deconstruct the topic "{broad_topic}" into 6 realistic Amazon non-fiction buyer search queries.
     Formula: [Specific Target Audience] + [Key Constraint / Specific Pain Point] + [Book Format].
@@ -223,7 +229,7 @@ def scout_seed_angles(broad_topic: str) -> list[dict]:
     3. Return ONLY a raw JSON array of 6 strings:
     ["query 1", "query 2", "query 3", "query 4", "query 5", "query 6"]
     """
-    raw = call_gemini(prompt, "You are an Amazon KDP keyword expansion specialist. Return strictly JSON.")
+    raw = call_llm(prompt, "You are an Amazon KDP keyword expansion specialist. Return strictly JSON.")
     candidates = extract_clean_list(raw)
 
     results = []
@@ -240,7 +246,7 @@ def scout_seed_angles(broad_topic: str) -> list[dict]:
 # --- RESEARCH AGENT & SCRAPER ---
 
 def harvest_organic_books(keyword: str, max_items: int = 8) -> list[dict]:
-    """Extracts organic book listings, review counts, ASINs, and indie indicators."""
+    """Extracts top organic non-fiction book listings from Amazon."""
     encoded_kw = requests.utils.quote(keyword)
     url = f"https://www.amazon.com/s?k={encoded_kw}&i=stripbooks"
     headers = {
@@ -292,7 +298,7 @@ def harvest_organic_books(keyword: str, max_items: int = 8) -> list[dict]:
 
 
 def generate_research_blueprint(keyword: str) -> tuple[dict, str]:
-    """Generates the full KDP Opportunity Report and Asset Blueprint."""
+    """Compiles the full market analysis and strategic publishing asset package."""
     books = harvest_organic_books(keyword)
     metrics = compute_comprehensive_score(books)
 
@@ -354,7 +360,7 @@ def generate_research_blueprint(keyword: str) -> tuple[dict, str]:
     - Comparison Matrix concept (Our Book vs Standard Alternatives).
     """
 
-    blueprint = call_gemini(prompt, "You are an elite Amazon KDP publishing director and direct-response book strategist.")
+    blueprint = call_llm(prompt, "You are an elite Amazon KDP publishing director and direct-response book strategist.")
     return metrics, blueprint
 
 
@@ -372,7 +378,7 @@ EVERGREEN_RADAR_TOPICS = [
 ]
 
 def scan_niche_radar() -> list[dict]:
-    """Autonomous scanner that sweeps evergreen niches and flags high-opportunity markets."""
+    """Runs automated sweeps across high-margin evergreen non-fiction niches."""
     alerts = []
     sampled_topics = random.sample(EVERGREEN_RADAR_TOPICS, 2)
 
