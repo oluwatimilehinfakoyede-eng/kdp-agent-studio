@@ -17,32 +17,55 @@ load_dotenv()
 gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-# Dual Gemini Flash primary tier
+# Primary Google Flash Models
 GEMINI_MODELS = [
     "gemini-3.8-flash",
     "gemini-3.7-flash"
 ]
 
-def call_groq_fallback(prompt: str, system_prompt: str = "") -> str:
-    """Zero-cost terminal fallback executing Llama 3.3 70B on Groq LPUs."""
-    messages = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": prompt})
+# Active High-Capacity Groq Models (Flagship 120B reasoning model first)
+GROQ_MODELS = [
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "qwen/qwen3.8-27b"
+]
 
-    chat_completion = groq_client.chat.completions.create(
-        messages=messages,
-        model="llama-3.3-70b-versatile",
-        temperature=0.7,
-    )
-    return chat_completion.choices[0].message.content
+def call_groq_fallback(prompt: str, system_prompt: str = "") -> str:
+    """
+    Terminal fallback across Groq's active high-parameter models on LPUs.
+    Automatically scrubs internal reasoning tags for clean Markdown output.
+    """
+    # Merge system instructions into the user payload as recommended for GPT-OSS
+    full_content = f"{system_prompt.strip()}\n\n{prompt.strip()}".strip() if system_prompt else prompt.strip()
+    messages = [{"role": "user", "content": full_content}]
+
+    last_groq_err = None
+
+    for model_id in GROQ_MODELS:
+        try:
+            chat_completion = groq_client.chat.completions.create(
+                messages=messages,
+                model=model_id,
+                temperature=0.7,
+            )
+            if chat_completion.choices and chat_completion.choices[0].message.content:
+                raw_text = chat_completion.choices[0].message.content
+                # Clean any internal reasoning traces
+                cleaned_text = re.sub(r"<(thought|think)>.*?</\1>", "", raw_text, flags=re.DOTALL).strip()
+                return cleaned_text if cleaned_text else raw_text
+        except Exception as e:
+            last_groq_err = e
+            print(f"[Groq: {model_id}] Unavailable: {e}. Trying next Groq endpoint...")
+            continue
+
+    raise RuntimeError(f"All Groq fallback models failed: {last_groq_err}")
 
 
 def call_llm(prompt: str, system_prompt: str = "") -> str:
     """
     Tiered LLM orchestrator:
-    1. Tries Gemini Flash models with 503 surge backoff.
-    2. Automatically routes to Groq (Llama 3.3 70B) if Google capacity fails.
+    1. Tries Gemini Flash models with progressive 503 surge absorption.
+    2. Automatically routes to Groq (GPT-OSS 120B) if Google capacity fails.
     """
     config = types.GenerateContentConfig(
         system_instruction=system_prompt if system_prompt else None,
@@ -69,7 +92,7 @@ def call_llm(prompt: str, system_prompt: str = "") -> str:
                     time.sleep(wait_time)
                     continue
 
-                # 429 Quota: Brief backoff
+                # 429 Quota: Exponential pause with jitter
                 elif any(code in err_str for code in ["429", "RESOURCE_EXHAUSTED"]):
                     sleep_time = (attempt + 1) * 4 + random.uniform(1.0, 2.0)
                     print(f"[{model_name}] Rate limited. Pausing {sleep_time:.1f}s...")
@@ -84,15 +107,15 @@ def call_llm(prompt: str, system_prompt: str = "") -> str:
                 break
 
     # Secondary Cloud Failover
-    print("[FAILOVER] Gemini unavailable. Handing off to Groq (Llama 3.3 70B)...")
+    print("[FAILOVER] Gemini unavailable. Handing off to Groq (GPT-OSS 120B)...")
     try:
         return call_groq_fallback(prompt, system_prompt)
     except Exception as groq_err:
-        raise RuntimeError(f"All Gemini models and Groq failover failed: {groq_err}")
+        raise RuntimeError(f"All Gemini models and Groq failovers failed: {groq_err}")
 
 
 def extract_clean_list(raw_response: str) -> list[str]:
-    """Parses JSON or numbered lists into clean query strings."""
+    """Parses JSON arrays or numbered query lists into clean strings."""
     match = re.search(r"\[\s*[\"'].*?[\"']\s*(?:,\s*[\"'].*?[\"']\s*)*\]", raw_response, re.DOTALL)
     if match:
         try:
