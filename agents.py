@@ -15,23 +15,30 @@ load_dotenv()
 # Initialize Gemini Client
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# Waterfall sequence: 3.8-flash -> 3.7-flash -> 3.6-flash
+# Waterfall sequence with high-capacity fallbacks for server surges
 MODELS_WATERFALL = [
     "gemini-3.8-flash",
     "gemini-3.7-flash",
-    "gemini-3.6-flash"
+    "gemini-3.6-flash",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash"
 ]
 
 def call_gemini(prompt: str, system_prompt: str = "") -> str:
-    """Executes prompt across the Flash waterfall with exponential backoff on 429 limits."""
+    """
+    Executes prompt across the waterfall.
+    - Rate limits (429): pauses and retries with backoff.
+    - Server surges (503): immediately jumps to the next available model.
+    """
     config = types.GenerateContentConfig(
         system_instruction=system_prompt if system_prompt else None,
         temperature=0.7,
     )
 
     last_error = None
+
     for model_name in MODELS_WATERFALL:
-        for attempt in range(3):
+        for attempt in range(2):
             try:
                 res = client.models.generate_content(
                     model=model_name,
@@ -43,9 +50,16 @@ def call_gemini(prompt: str, system_prompt: str = "") -> str:
             except APIError as e:
                 last_error = e
                 err_str = str(e)
-                if any(code in err_str for code in ["429", "RESOURCE_EXHAUSTED", "503", "500"]):
-                    sleep_time = (2 ** attempt) + random.uniform(1.2, 2.8)
-                    print(f"[{model_name}] Throttled. Backing off for {sleep_time:.2f}s...")
+                
+                # 503 / High Demand: Hop immediately to the next model
+                if "503" in err_str or "UNAVAILABLE" in err_str:
+                    print(f"[{model_name}] 503 High Demand on Google's end. Switching to next model...")
+                    break
+                
+                # 429 / Rate Limit: Back off and retry
+                elif any(code in err_str for code in ["429", "RESOURCE_EXHAUSTED"]):
+                    sleep_time = (2 ** attempt) + random.uniform(1.2, 2.5)
+                    print(f"[{model_name}] Rate limited (429). Waiting {sleep_time:.2f}s...")
                     time.sleep(sleep_time)
                     continue
                 else:
@@ -53,10 +67,10 @@ def call_gemini(prompt: str, system_prompt: str = "") -> str:
                     break
             except Exception as e:
                 last_error = e
-                print(f"[{model_name}] Unexpected: {e}")
+                print(f"[{model_name}] Unexpected error: {e}")
                 break
 
-    raise RuntimeError(f"All Gemini models exhausted. Last error: {last_error}")
+    raise RuntimeError(f"All Gemini models exhausted during traffic surge. Last error: {last_error}")
 
 
 def extract_clean_list(raw_response: str) -> list[str]:
@@ -103,10 +117,7 @@ def estimate_daily_sales(bsr: int) -> int:
 
 
 def compute_comprehensive_score(books: list[dict]) -> dict:
-    """
-    Computes a 100-point KDP Viability Score factoring in review saturation,
-    indie publisher presence, and estimated sales velocity.
-    """
+    """Computes a 100-point KDP Viability Score."""
     if not books:
         return {
             "total": 68,
@@ -129,7 +140,6 @@ def compute_comprehensive_score(books: list[dict]) -> dict:
 
     indie_count = sum(1 for b in books if b.get("is_indie", False))
 
-    # Demand: 40 points maximum (based on estimated sales velocity and listing count)
     if avg_bsr < 15000:
         demand_pts = 40
     elif avg_bsr < 40000:
@@ -139,7 +149,6 @@ def compute_comprehensive_score(books: list[dict]) -> dict:
     else:
         demand_pts = 14
 
-    # Competition Barrier: 35 points maximum (low reviews + indie penetration = higher score)
     comp_pts = 10
     if avg_reviews < 100:
         comp_pts += 20
@@ -150,19 +159,16 @@ def compute_comprehensive_score(books: list[dict]) -> dict:
     else:
         comp_pts += 2
 
-    # Reward niches where independent authors are actively succeeding
     if indie_count >= 4:
         comp_pts += 5
     elif indie_count >= 2:
         comp_pts += 3
 
     comp_pts = min(comp_pts, 35)
-    series_pts = 25  # Evergreen non-fiction series upside
-
-    total_score = demand_pts + comp_pts + series_pts
+    series_pts = 25
 
     return {
-        "total": total_score,
+        "total": demand_pts + comp_pts + series_pts,
         "demand": demand_pts,
         "competition": comp_pts,
         "series": series_pts,
@@ -256,11 +262,8 @@ def harvest_organic_books(keyword: str, max_items: int = 8) -> list[dict]:
                 rev_elem = item.find("span", {"class": re.compile(r"s-underline-text")})
                 reviews = int(re.sub(r"[^\d]", "", rev_elem.text)) if rev_elem else 0
 
-                # Check indicators for independently published books
                 raw_card_text = item.get_text()
                 is_indie = bool(re.search(r"Independently published", raw_card_text, re.I))
-
-                # Estimate baseline BSR based on ranking and review velocity
                 derived_bsr = max(4500, int(180000 / (reviews + 1) * (len(books) + 1)))
 
                 if title:
@@ -363,7 +366,6 @@ EVERGREEN_RADAR_TOPICS = [
 def scan_niche_radar() -> list[dict]:
     """Autonomous scanner that sweeps evergreen niches and flags high-opportunity markets."""
     alerts = []
-    # Pick 2 random topics per scan to preserve API quotas and rotate coverage
     sampled_topics = random.sample(EVERGREEN_RADAR_TOPICS, 2)
 
     for topic in sampled_topics:
