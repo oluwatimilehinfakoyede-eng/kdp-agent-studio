@@ -74,7 +74,7 @@ def scout_seed_angles(broad_topic: str) -> list[dict]:
 
 def harvest_organic_books(keyword: str, max_items: int = 10) -> list[dict]:
     """Tool: Scrapes Amazon book results while filtering out sponsored ads."""
-    url = f"[https://www.amazon.com/s?k=](https://www.amazon.com/s?k=){requests.utils.quote(keyword)}&i=stripbooks"
+    url = f"https://www.amazon.com/s?k={requests.utils.quote(keyword)}&i=stripbooks"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept-Language": "en-US,en;q=0.9",
