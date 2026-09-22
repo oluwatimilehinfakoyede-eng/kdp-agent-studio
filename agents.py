@@ -15,20 +15,20 @@ load_dotenv()
 # Initialize Gemini Client
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# Waterfall sequence with high-capacity fallbacks for server surges
+# Waterfall sequence including Gemini 3.1
 MODELS_WATERFALL = [
     "gemini-3.8-flash",
     "gemini-3.7-flash",
     "gemini-3.6-flash",
-    "gemini-2.5-flash",
-    "gemini-2.0-flash"
+    "gemini-3.1-flash",
+    "gemini-3.1-pro"
 ]
 
 def call_gemini(prompt: str, system_prompt: str = "") -> str:
     """
     Executes prompt across the waterfall.
-    - Rate limits (429): pauses and retries with backoff.
-    - Server surges (503): immediately jumps to the next available model.
+    - 503 / UNAVAILABLE: pauses briefly and hops to the next model.
+    - 429 / RESOURCE_EXHAUSTED: backs off with jitter and retries.
     """
     config = types.GenerateContentConfig(
         system_instruction=system_prompt if system_prompt else None,
@@ -50,18 +50,25 @@ def call_gemini(prompt: str, system_prompt: str = "") -> str:
             except APIError as e:
                 last_error = e
                 err_str = str(e)
-                
-                # 503 / High Demand: Hop immediately to the next model
+
+                # 503 / High Demand: brief 2s pause, then hop to next model
                 if "503" in err_str or "UNAVAILABLE" in err_str:
-                    print(f"[{model_name}] 503 High Demand on Google's end. Switching to next model...")
+                    print(f"[{model_name}] 503 High Demand on Google side. Hopping to next model...")
+                    time.sleep(2.0)
                     break
-                
-                # 429 / Rate Limit: Back off and retry
+
+                # 429 / Rate Limit: Back off with jitter and retry
                 elif any(code in err_str for code in ["429", "RESOURCE_EXHAUSTED"]):
                     sleep_time = (2 ** attempt) + random.uniform(1.2, 2.5)
                     print(f"[{model_name}] Rate limited (429). Waiting {sleep_time:.2f}s...")
                     time.sleep(sleep_time)
                     continue
+
+                # 404 / Deprecated model: skip immediately
+                elif "404" in err_str or "NOT_FOUND" in err_str:
+                    print(f"[{model_name}] Model unavailable or deprecated. Skipping...")
+                    break
+
                 else:
                     print(f"[{model_name}] API Error: {e}")
                     break
