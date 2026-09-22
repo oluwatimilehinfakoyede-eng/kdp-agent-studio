@@ -15,18 +15,20 @@ load_dotenv()
 # Initialize Gemini Client
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# Strict 3-Stage Flash Waterfall
+# 4-Stage Gemini 3.x Flash waterfall
 MODELS_WATERFALL = [
     "gemini-3.8-flash",
     "gemini-3.7-flash",
-    "gemini-3.6-flash"
+    "gemini-3.6-flash",
+    "gemini-3.5-flash"
 ]
 
 def call_gemini(prompt: str, system_prompt: str = "") -> str:
     """
-    Executes prompt across the 3 Flash models.
-    - 503 / High Demand: pauses 2.5s and tries the next Flash model.
-    - 429 / Rate Limit: backs off with jitter and retries up to 3 times per model.
+    Executes prompt across the 4 Flash models with dynamic 503 surge backoff.
+    - 503 / UNAVAILABLE: pauses 7-9s on attempt 1, 14-16s on attempt 2 before trying next model.
+    - 429 / RESOURCE_EXHAUSTED: exponential backoff with random jitter.
+    - 404 / NOT_FOUND: immediately advances to the next model.
     """
     config = types.GenerateContentConfig(
         system_instruction=system_prompt if system_prompt else None,
@@ -36,7 +38,7 @@ def call_gemini(prompt: str, system_prompt: str = "") -> str:
     last_error = None
 
     for model_name in MODELS_WATERFALL:
-        for attempt in range(3):
+        for attempt in range(2):
             try:
                 res = client.models.generate_content(
                     model=model_name,
@@ -49,18 +51,24 @@ def call_gemini(prompt: str, system_prompt: str = "") -> str:
                 last_error = e
                 err_str = str(e)
 
-                # 503 / Surge: Brief pause, then roll to next flash model
+                # 503 / High Demand: Progressive pause to ride out capacity waves before hopping
                 if "503" in err_str or "UNAVAILABLE" in err_str:
-                    print(f"[{model_name}] 503 demand surge on Google side. Hopping to next Flash model...")
-                    time.sleep(2.5)
-                    break
+                    wait_time = (attempt + 1) * 7 + random.uniform(1.0, 3.0)
+                    print(f"[{model_name}] 503 surge (Attempt {attempt + 1}/2). Waiting {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                    continue
 
-                # 429 / Rate Limit: Exponential backoff with jitter
+                # 429 / Rate Limit: Exponential backoff
                 elif any(code in err_str for code in ["429", "RESOURCE_EXHAUSTED"]):
-                    sleep_time = (2 ** attempt) + random.uniform(1.2, 2.5)
-                    print(f"[{model_name}] Rate limited (429). Waiting {sleep_time:.2f}s...")
+                    sleep_time = (2 ** attempt) * 4 + random.uniform(1.5, 3.0)
+                    print(f"[{model_name}] Rate limited (429). Waiting {sleep_time:.1f}s...")
                     time.sleep(sleep_time)
                     continue
+
+                # 404 / Missing endpoint: advance immediately
+                elif "404" in err_str or "NOT_FOUND" in err_str:
+                    print(f"[{model_name}] Model not found. Skipping to next model...")
+                    break
 
                 else:
                     print(f"[{model_name}] API Error: {e}")
@@ -70,7 +78,7 @@ def call_gemini(prompt: str, system_prompt: str = "") -> str:
                 print(f"[{model_name}] Unexpected error: {e}")
                 break
 
-    raise RuntimeError(f"All 3 Flash models exhausted. Last error: {last_error}")
+    raise RuntimeError(f"All 4 Flash models temporarily busy. Please wait 60s and re-run. (Details: {last_error})")
 
 
 def extract_clean_list(raw_response: str) -> list[str]:
