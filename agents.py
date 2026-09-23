@@ -6,110 +6,66 @@ import random
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
-from google.genai.errors import APIError
 from groq import Groq
 
 load_dotenv()
 
-# Initialize API Clients
-gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+# Initialize Groq Client
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-# Primary Google Flash Models
-GEMINI_MODELS = [
-    "gemini-3.8-flash",
-    "gemini-3.7-flash"
-]
-
-# Active High-Capacity Groq Models (120B reasoning first)
+# Active High-Capacity Groq Models (120B reasoning first, followed by speed/efficiency models)
 GROQ_MODELS = [
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
     "qwen/qwen3.8-27b"
 ]
 
-def call_groq_fallback(prompt: str, system_prompt: str = "") -> str:
+def call_llm(prompt: str, system_prompt: str = "") -> str:
     """
-    Terminal fallback across Groq's active high-parameter models on LPUs.
-    Automatically scrubs internal reasoning tags for clean Markdown output.
+    Direct Groq LPU orchestrator:
+    - Cycles through active 120B/20B/27B models.
+    - Handles rate limits (429) with jittered backoff.
+    - Scrubs internal model reasoning tags (<think>, <thought>) for clean Markdown.
     """
     full_content = f"{system_prompt.strip()}\n\n{prompt.strip()}".strip() if system_prompt else prompt.strip()
     messages = [{"role": "user", "content": full_content}]
 
-    last_groq_err = None
+    last_error = None
 
     for model_id in GROQ_MODELS:
-        try:
-            chat_completion = groq_client.chat.completions.create(
-                messages=messages,
-                model=model_id,
-                temperature=0.7,
-            )
-            if chat_completion.choices and chat_completion.choices[0].message.content:
-                raw_text = chat_completion.choices[0].message.content
-                cleaned_text = re.sub(r"<(thought|think)>.*?</\1>", "", raw_text, flags=re.DOTALL).strip()
-                return cleaned_text if cleaned_text else raw_text
-        except Exception as e:
-            last_groq_err = e
-            print(f"[Groq: {model_id}] Unavailable: {e}. Trying next Groq endpoint...")
-            continue
-
-    raise RuntimeError(f"All Groq fallback models failed: {last_groq_err}")
-
-
-def call_llm(prompt: str, system_prompt: str = "") -> str:
-    """
-    Tiered LLM orchestrator:
-    1. Tries Gemini Flash models with progressive 503 surge absorption.
-    2. Automatically routes to Groq (GPT-OSS 120B) if Google capacity fails.
-    """
-    config = types.GenerateContentConfig(
-        system_instruction=system_prompt if system_prompt else None,
-        temperature=0.7,
-    )
-
-    for model_name in GEMINI_MODELS:
         for attempt in range(2):
             try:
-                res = gemini_client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config=config
+                chat_completion = groq_client.chat.completions.create(
+                    messages=messages,
+                    model=model_id,
+                    temperature=0.7,
                 )
-                if res and res.text:
-                    return res.text
-            except APIError as e:
+                if chat_completion.choices and chat_completion.choices[0].message.content:
+                    raw_text = chat_completion.choices[0].message.content
+                    # Scrub internal reasoning traces
+                    cleaned_text = re.sub(r"<(thought|think)>.*?</\1>", "", raw_text, flags=re.DOTALL).strip()
+                    return cleaned_text if cleaned_text else raw_text
+            except Exception as e:
+                last_error = e
                 err_str = str(e)
 
-                # 503 Surge: Progressive pause to ride out server traffic
-                if "503" in err_str or "UNAVAILABLE" in err_str:
-                    wait_time = (attempt + 1) * 7 + random.uniform(1.0, 2.5)
-                    print(f"[{model_name}] 503 surge. Pausing {wait_time:.1f}s...")
+                # Rate Limit (429): Short pause for rolling window reset
+                if "429" in err_str or "rate_limit_exceeded" in err_str:
+                    wait_time = (attempt + 1) * 3 + random.uniform(1.0, 2.0)
+                    print(f"[{model_id}] Groq rate limit hit. Pausing {wait_time:.1f}s...")
                     time.sleep(wait_time)
                     continue
 
-                # 429 Quota: Exponential pause with jitter
-                elif any(code in err_str for code in ["429", "RESOURCE_EXHAUSTED"]):
-                    sleep_time = (attempt + 1) * 4 + random.uniform(1.0, 2.0)
-                    print(f"[{model_name}] Rate limited. Pausing {sleep_time:.1f}s...")
-                    time.sleep(sleep_time)
-                    continue
+                # Missing endpoint / Deprecated model: Skip immediately
+                elif "404" in err_str or "model_not_found" in err_str:
+                    print(f"[{model_id}] Model retired or not found. Skipping...")
+                    break
 
                 else:
-                    print(f"[{model_name}] API Error: {e}")
+                    print(f"[{model_id}] Error: {e}")
                     break
-            except Exception as e:
-                print(f"[{model_name}] Error: {e}")
-                break
 
-    # Secondary Cloud Failover
-    print("[FAILOVER] Gemini unavailable. Handing off to Groq (GPT-OSS 120B)...")
-    try:
-        return call_groq_fallback(prompt, system_prompt)
-    except Exception as groq_err:
-        raise RuntimeError(f"All Gemini models and Groq failovers failed: {groq_err}")
+    raise RuntimeError(f"All Groq models temporarily unavailable: {last_error}")
 
 
 def extract_clean_list(raw_response: str) -> list[str]:
@@ -329,7 +285,7 @@ def generate_research_blueprint(keyword: str) -> tuple[dict, str]:
         for b in books
     ]) if books else f"Market projection derived specifically for the '{keyword}' sub-genre."
 
-    # Programmatic Gatekeeping (The model CANNOT overturn the score verdict)
+    # Programmatic Gatekeeping (Score dictates output structure)
     if score >= 78:
         verdict = "GO (STRONG COMMERCIAL OPPORTUNITY)"
         tone_instruction = f"""
@@ -362,7 +318,7 @@ def generate_research_blueprint(keyword: str) -> tuple[dict, str]:
         VERDICT ENFORCED: {verdict}
         RUTHLESSLY TEAR THIS NICHE APART. It is NOT commercially viable for an independent publisher.
         Provide the following sections ONLY:
-        1. EXECUTIVE AUTOPSY: Break down the fatal flaw (e.g., dominated by celebrity/legacy publisher moats, review counts > 500, or near-zero buyer search demand).
+        1. EXECUTIVE AUTOPSY: Break down the fatal flaw (dominated by celebrity/legacy publisher moats, review counts > 500, or near-zero buyer search demand).
         2. FINANCIAL REALITY CHECK: Demonstrate why Amazon PPC advertising costs (Cost-Per-Click vs Royalties) will guarantee negative ROI.
         3. TWO UNRELATED EVERGREEN ALTERNATIVES: Present 2 completely different indie-viable non-fiction niches that actually have low competition and high search volume.
         CRITICAL: DO NOT generate outlines, title hooks, keywords, or marketing assets. Do not encourage publishing here.
