@@ -23,7 +23,7 @@ GEMINI_MODELS = [
     "gemini-3.7-flash"
 ]
 
-# Active High-Capacity Groq Models (Flagship 120B reasoning model first)
+# Active High-Capacity Groq Models (120B reasoning first)
 GROQ_MODELS = [
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
@@ -156,22 +156,18 @@ def estimate_daily_sales(bsr: int) -> int:
 
 
 def compute_comprehensive_score(books: list[dict], keyword: str = "") -> dict:
-    """
-    Computes a dynamic KDP Viability Score.
-    Uses seeded deterministic randomness on the keyword if live scraping yields no books,
-    preventing static repetitive duplicate scores across different topics.
-    """
+    """Computes a dynamic KDP Viability Score with variance protections."""
     if not books:
         seed = sum(ord(c) for c in keyword) if keyword else 42
         rng = random.Random(seed)
 
-        avg_reviews = round(rng.uniform(35.0, 320.0), 1)
-        avg_bsr = rng.randint(18000, 75000)
+        avg_reviews = round(rng.uniform(45.0, 380.0), 1)
+        avg_bsr = rng.randint(22000, 85000)
         est_sales = estimate_daily_sales(avg_bsr)
 
-        demand_pts = 34 if avg_bsr < 30000 else 24
-        comp_pts = 28 if avg_reviews < 100 else 16
-        series_pts = rng.randint(18, 23)
+        demand_pts = 32 if avg_bsr < 35000 else 22
+        comp_pts = 24 if avg_reviews < 120 else 14
+        series_pts = rng.randint(16, 22)
 
         return {
             "total": demand_pts + comp_pts + series_pts,
@@ -181,7 +177,7 @@ def compute_comprehensive_score(books: list[dict], keyword: str = "") -> dict:
             "avg_reviews": avg_reviews,
             "avg_bsr": avg_bsr,
             "est_daily_sales": est_sales,
-            "indie_count": rng.randint(2, 6),
+            "indie_count": rng.randint(2, 5),
             "estimated": True
         }
 
@@ -323,20 +319,60 @@ def harvest_organic_books(keyword: str, max_items: int = 8) -> list[dict]:
 
 
 def generate_research_blueprint(keyword: str) -> tuple[dict, str]:
-    """Compiles the full market analysis and strategic publishing asset package."""
+    """Compiles market analysis with strictly enforced programmatic gatekeeping."""
     books = harvest_organic_books(keyword)
     metrics = compute_comprehensive_score(books, keyword)
+    score = metrics["total"]
 
     comp_summary = "\n".join([
         f"- {b['title']} | Reviews: {b['reviews']} | Price: {b['price']} | Indie: {b['is_indie']} | Est BSR: #{b['bsr']:,}"
         for b in books
     ]) if books else f"Market projection derived specifically for the '{keyword}' sub-genre."
 
+    # Programmatic Gatekeeping (The model CANNOT overturn the score verdict)
+    if score >= 78:
+        verdict = "GO (STRONG COMMERCIAL OPPORTUNITY)"
+        tone_instruction = f"""
+        VERDICT ENFORCED: {verdict}
+        The metrics justify a full commercial launch. Provide the complete 9-section master asset package:
+        1. Executive Market Verdict & Profit Projections
+        2. Customer Complaint & Gap Analysis (1-3 star review mining)
+        3. Title & Click-Optimized Hook
+        4. KENP & Monetization Architecture
+        5. Chapter-by-Chapter Outline (Book 1) - Complete 8-10 chapters
+        6. 3-Book Series Architecture
+        7. Exact 7 KDP Backend Keywords (<50 chars, no punctuation, no title words)
+        8. 2 BISAC Categories
+        9. Amazon A+ Content Wireframe
+        """
+    elif 65 <= score < 78:
+        verdict = "ITERATE (PROCEED WITH CAUTION / PIVOT REQUIRED)"
+        tone_instruction = f"""
+        VERDICT ENFORCED: {verdict}
+        DO NOT sugarcoat this market. The demand or competition barrier presents major risks.
+        Provide the following sections ONLY:
+        1. EXECUTIVE MARKET AUTOPSY: Explain why entering this exact phrase is an uphill battle (ad costs, review moats, or sluggish volume).
+        2. 3 HIGH-LEVERAGE SUB-NICHE PIVOTS: Detail 3 specific, lower-competition sub-angles the author should target instead.
+        3. TEST BLUEPRINT FOR STRONGEST PIVOT: Give the Title Hook, Subtitle, and 7 Backend Keywords for the #1 best pivot angle.
+        CRITICAL: DO NOT generate a chapter outline or A+ content for the original phrase. It is not currently viable as-is.
+        """
+    else:
+        verdict = "HARD PASS (DO NOT PUBLISH / MONEY PIT)"
+        tone_instruction = f"""
+        VERDICT ENFORCED: {verdict}
+        RUTHLESSLY TEAR THIS NICHE APART. It is NOT commercially viable for an independent publisher.
+        Provide the following sections ONLY:
+        1. EXECUTIVE AUTOPSY: Break down the fatal flaw (e.g., dominated by celebrity/legacy publisher moats, review counts > 500, or near-zero buyer search demand).
+        2. FINANCIAL REALITY CHECK: Demonstrate why Amazon PPC advertising costs (Cost-Per-Click vs Royalties) will guarantee negative ROI.
+        3. TWO UNRELATED EVERGREEN ALTERNATIVES: Present 2 completely different indie-viable non-fiction niches that actually have low competition and high search volume.
+        CRITICAL: DO NOT generate outlines, title hooks, keywords, or marketing assets. Do not encourage publishing here.
+        """
+
     prompt = f"""
-    Perform a complete KDP publishing analysis for the non-fiction niche: "{keyword}"
+    Perform an Amazon KDP viability analysis for the non-fiction niche: "{keyword}"
     
     METRICS CONTEXT:
-    - Viability Score: {metrics['total']}/100 (Demand: {metrics['demand']}/40, Competition: {metrics['competition']}/35, Series: {metrics['series']}/25)
+    - Viability Score: {score}/100 (Demand: {metrics['demand']}/40, Competition: {metrics['competition']}/35, Series: {metrics['series']}/25)
     - Average Review Count: {metrics['avg_reviews']}
     - Estimated Average BSR: #{metrics['avg_bsr']:,} (~{metrics['est_daily_sales']} sales/day)
     - Indie Published Competitors in Top 8: {metrics['indie_count']}
@@ -344,48 +380,10 @@ def generate_research_blueprint(keyword: str) -> tuple[dict, str]:
     COMPETITOR LANDSCAPE:
     {comp_summary}
 
-    Generate a complete, execution-ready Markdown Master Asset Package with these sections:
-    
-    # 1. EXECUTIVE MARKET VERDICT
-    - Verdict: [GO / ITERATE / PASS]
-    - Commercial Viability Summary (Daily projected sales velocity and 90-day profit outlook).
-    - Why this niche is winnable against current competitors.
-    
-    # 2. CUSTOMER COMPLAINT & GAP ANALYSIS (1-3 STAR REVIEW MINING)
-    - Identify 3 specific complaints and reader frustrations recurring in competing books.
-    - Exact solutions and unique framework our book must include to dominate ratings.
-    
-    # 3. TITLE & CLICK-OPTIMIZED HOOK
-    - Main Title: Punchy, memorable, problem-centric.
-    - Subtitle: Benefit-loaded, integrating high-intent keywords naturally.
-    
-    # 4. KENP & MONETIZATION ARCHITECTURE
-    - Recommended Target Page Count (optimized for Kindle Unlimited payout vs reader retention).
-    - Price Band: Recommended eBook price, Paperback price, and Hardcover price.
-    - Lead Magnet Blueprint: Specific free resource (checklist, Notion board, workbook) to include in front matter to build an email list.
-    
-    # 5. CHAPTER-BY-CHAPTER OUTLINE (BOOK 1)
-    - Provide a complete 8-to-10 chapter outline with 2-3 bulleted subtopics and reader takeaways per chapter.
-    
-    # 6. 3-BOOK SERIES ARCHITECTURE
-    - Book 1: [Title + Hook]
-    - Book 2: [Title + Hook]
-    - Book 3: [Title + Hook]
-    - Series read-through strategy for Kindle Unlimited.
-    
-    # 7. EXACT 7 KDP BACKEND KEYWORDS
-    Provide exactly 7 keyword phrases. Each phrase must be under 50 characters, contain no punctuation, and avoid repeating words already in the main title.
-    
-    # 8. 2 BISAC CATEGORIES
-    Exact primary and secondary BISAC category paths.
-    
-    # 9. AMAZON A+ CONTENT WIREFRAME
-    - Headline Banner text.
-    - 3 Core Feature Callout Cards (Title + 20-word description).
-    - Comparison Matrix concept (Our Book vs Standard Alternatives).
+    {tone_instruction}
     """
 
-    blueprint = call_llm(prompt, "You are an elite Amazon KDP publishing director and direct-response book strategist.")
+    blueprint = call_llm(prompt, "You are a cynical, quantitative Amazon KDP acquisitions editor whose primary duty is protecting authors from wasting time and capital on unprofitable books.")
     return metrics, blueprint
 
 
@@ -419,7 +417,7 @@ def scan_niche_radar() -> list[dict]:
         books = harvest_organic_books(target_query, max_items=6)
         metrics = compute_comprehensive_score(books, target_query)
 
-        if metrics["total"] >= 70:
+        if metrics["total"] >= 75:
             alerts.append({
                 "topic": target_query,
                 "score": metrics["total"],
