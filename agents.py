@@ -13,7 +13,7 @@ load_dotenv()
 # Initialize Groq Client
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-# Tiered Groq High-Parameter Pool
+# High-Speed Reasoning & Efficiency Endpoints
 GROQ_MODELS = [
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
@@ -23,7 +23,7 @@ GROQ_MODELS = [
 def call_llm(prompt: str, system_prompt: str = "") -> str:
     """
     Direct Groq LPU orchestrator.
-    Executes reasoning models, handles rolling token windows, and cleans internal thinking tags.
+    Handles rolling token windows, cleans internal reasoning tags, and fails over across models.
     """
     full_content = f"{system_prompt.strip()}\n\n{prompt.strip()}".strip() if system_prompt else prompt.strip()
     messages = [{"role": "user", "content": full_content}]
@@ -123,9 +123,9 @@ def calculate_kenp_economics(bsr: int, target_pages: int = 190) -> dict:
 def compute_comprehensive_score(books: list[dict], keyword: str = "") -> dict:
     """
     Computes a KDP Viability Score heavily weighted toward Kindle Unlimited economics.
-    Maintains full backward compatibility for main.py with 'est_daily_sales'.
+    Demand: 35 | Competition: 35 | Series: 30 = 100 Pts Total.
     """
-    if len(books) < 4:
+    if not books or len(books) < 2:
         kenp_data = calculate_kenp_economics(190000)
         return {
             "total": 35,
@@ -173,21 +173,21 @@ def compute_comprehensive_score(books: list[dict], keyword: str = "") -> dict:
     elif avg_reviews < 350:
         comp_pts += 6
 
-    if vulnerable_count >= 4:
+    if vulnerable_count >= 3:
         comp_pts += 8
-    elif vulnerable_count >= 2:
+    elif vulnerable_count >= 1:
         comp_pts += 4
 
     comp_pts = min(comp_pts, 35)
 
     # 3. Series Elasticity & Indie Presence (Max 30 Pts)
     series_pts = 12
-    if indie_count >= 4:
+    if indie_count >= 3:
         series_pts += 10
-    elif indie_count >= 2:
+    elif indie_count >= 1:
         series_pts += 6
 
-    if any(term in keyword.lower() for term in ["protocol", "routine", "exercises", "reset", "system", "workbook", "diet", "plan"]):
+    if any(term in keyword.lower() for term in ["protocol", "routine", "exercises", "reset", "system", "workbook", "diet", "plan", "blueprint", "checklist"]):
         series_pts += 8
 
     series_pts = min(series_pts, 30)
@@ -216,7 +216,7 @@ def probe_amazon_suggestions(prefix: str) -> list[str]:
     url = "https://completion.amazon.com/api/2017/suggestions"
     params = {"mid": "ATVPDKIKX0DER", "alias": "digital-text", "prefix": prefix}
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
         "Accept": "application/json",
     }
     try:
@@ -257,12 +257,14 @@ def scout_seed_angles(broad_topic: str) -> list[dict]:
 # --- RESEARCH AGENT & DIGITAL SCRAPER ---
 
 def harvest_organic_books(keyword: str, max_items: int = 8) -> list[dict]:
-    """Harvests top Kindle non-fiction listings via DuckDuckGo HTML bridge."""
-    query = f"site:amazon.com/dp/ {keyword} Kindle Edition"
+    """Harvests top Kindle non-fiction listings via DuckDuckGo HTML bridge without breaking snippets."""
+    clean_kw = re.sub(r"[^\w\s]", "", keyword).strip()
+    query = f"site:amazon.com/dp/ {clean_kw}"
     url = "https://html.duckduckgo.com/html/"
     params = {"q": query}
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
     }
 
     books = []
@@ -307,7 +309,7 @@ def generate_research_blueprint(keyword: str) -> tuple[dict, str]:
         tone_instruction = f"""
         VERDICT ENFORCED: {verdict}
         Tear this keyword apart immediately.
-        Fewer than 4 organic Kindle titles exist for this phrase on Amazon.
+        Fewer than 2 organic Kindle titles exist for this phrase on Amazon.
         Explain that this topic has near-zero Kindle search volume and readers are not borrowing here.
         Provide 2 adjacent evergreen Kindle niches with verified borrow demand.
         """
@@ -327,7 +329,7 @@ def generate_research_blueprint(keyword: str) -> tuple[dict, str]:
         - Why this niche is winnable against the top 8 indie competitors.
 
         # 2. 1-TO-3 STAR CUSTOMER COMPLAINT MINING (THE VULNERABILITY MATRIX)
-        - Identify 3 recurring complaints from competitors' reviews (e.g. unreadable e-ink diagrams, filler content, missing action steps, theoretical fluff).
+        - Identify 3 recurring complaints from competitors' reviews.
         - Exact proprietary frameworks and interactive cheat-sheets our eBook will embed to secure immediate 5-star ratings.
 
         # 3. HIGH-CONVERTING KINDLE TITLE & MOBILE HOOK
@@ -337,10 +339,10 @@ def generate_research_blueprint(keyword: str) -> tuple[dict, str]:
 
         # 4. DIGITAL PRICING & FRONT-MATTER LEAD ENGINE
         - Standalone eBook Price: $2.99 or $3.99 (Forces readers toward the $0.00 'Read for Free with Kindle Unlimited' button while retaining 70% royalty on cash sales).
-        - Front-Matter Lead Magnet: Specific digital asset (interactive Notion board, fillable PDF checklist, or audio routine) linked on Page 2 BEFORE Chapter 1 to capture subscriber emails immediately.
+        - Front-Matter Lead Magnet: Specific digital asset linked on Page 2 BEFORE Chapter 1 to capture subscriber emails immediately.
 
         # 5. HIGH-VELOCITY BINGE-READ CHAPTER OUTLINE (BOOK 1)
-        - 8-to-10 chapter outline engineered for high completion velocity (avoiding Kindle abandonment).
+        - 8-to-10 chapter outline engineered for high completion velocity.
         - Provide 3 concrete subtopics and a distinct "Immediate Reader Takeaway" per chapter.
 
         # 6. 3-BOOK KU ECOSYSTEM & 1-CLICK BACK-MATTER FUNNEL
@@ -376,7 +378,7 @@ def generate_research_blueprint(keyword: str) -> tuple[dict, str]:
         tone_instruction = f"""
         VERDICT ENFORCED: {verdict}
         RUTHLESSLY DISQUALIFY THIS TOPIC FOR KINDLE UNLIMITED.
-        1. Break down the fatal flaw (e.g., dominated by free public domain books, legacy publishers, or review moats > 500).
+        1. Break down the fatal flaw.
         2. Demonstrate why this topic will produce near-zero KENP page reads.
         3. Present 2 completely different indie-viable Kindle non-fiction niches that have high borrow velocity.
         CRITICAL: DO NOT generate outlines or marketing packages for a disqualified topic.
@@ -406,62 +408,101 @@ def generate_research_blueprint(keyword: str) -> tuple[dict, str]:
     return metrics, blueprint
 
 
-# --- AUTONOMOUS GOLD-NUGGET RADAR (HIGH-BORROW KU CLUSTERS) ---
+# --- AUTONOMOUS PERSISTENT GOLD-NUGGET RADAR (50+ HIGH-KENP CLUSTERS) ---
 
 GOLDEN_SEED_CLUSTERS = [
+    # 1. Specialized Medical Diets (High intent, urgent buyer problems)
+    "low oxalate cookbook for kidney stones",
+    "gastroparesis diet meal plan beginners",
+    "histamine intolerance recipes cookbook",
+    "fatty liver disease diet meal plan",
+    "diverticulitis diet cookbook for beginners",
+    "renal diet cookbook for stage 3 kidney disease",
+    "gerd and acid reflux diet cookbook",
+    "anti inflammatory diet for hashimotos",
+    "gallbladder diet meal plan after surgery",
+    "sibo diet recipe book for beginners",
+    
+    # 2. Somatic & Nervous System Regulation (High digital borrow volume)
     "somatic exercises for nervous system regulation",
     "polyvagal theory exercises for trauma release",
-    "vagus nerve reset chronic fatigue",
+    "vagus nerve reset chronic fatigue syndrome",
     "somatic therapy for chronic pain relief",
+    "somatic exercises for pelvic floor release",
+    "nervous system regulation for anxiety workbook",
+    "vagus nerve exercises for long covid fatigue",
+    
+    # 3. Adult Neurodiversity & Executive Function (High completion rate)
     "adhd cleaning routines for adults",
     "neurodivergent home organization systems",
     "autism burnout recovery workbook adults",
     "executive dysfunction workbook for adults",
-    "low oxalate cookbook for kidney stones",
-    "histamine intolerance meal plan recipes",
-    "gastroparesis diet cookbook for beginners",
-    "fatty liver disease diet meal plan",
-    "diverticulitis diet cookbook for beginners",
+    "adhd decluttering and organizing workbook",
+    "adhd budgeting and money management workbook",
+    "time blindness adhd productivity system",
+    
+    # 4. Senior Mobility & Functional Longevity (Large e-reader audience)
     "wall pilates workouts for seniors over 60",
     "chair yoga for seniors joint pain relief",
     "strength training balance seniors 70+",
-    "tai chi exercises for seniors balance",
+    "tai chi exercises for seniors balance fall prevention",
+    "seated exercises for seniors over 80",
+    "stretching and mobility routines for stiff seniors",
+    "sciatica pain relief exercises at home",
+    
+    # 5. High-Intent Solopreneur SOPs (Direct problem solvers)
     "bookkeeping basics for single member llc",
     "trucking business dispatching and tax guide",
     "airbnb management operations standard procedures",
-    "freelance bookkeeping business startup guide",
+    "medical billing and coding from home startup",
+    "notary signing agent complete operations handbook",
+    "freelance bookkeeping business startup blueprint",
+    
+    # 6. Behavioral Parenting & Special Needs (Urgent household challenges)
     "dysregulated child emotional regulation toolkit",
     "oppositional defiant disorder parenting strategies",
     "toddler sleep training gentle methods without crying",
     "sensory processing disorder activities home",
-    "corporate burnout recovery workbook professionals",
+    "adhd parenting strategies for explosive children",
+    "pathological demand avoidance parenting handbook",
+    
+    # 7. Women's Metabolic & Hormonal Recovery
     "perimenopause weight gain and hormone reset",
-    "post concussion syndrome recovery protocol",
-    "cortisol reset diet for women exhaustion"
+    "cortisol reset diet for exhausted women",
+    "pcos insulin resistance diet cookbook",
+    "endometriosis diet and inflammation management",
+    "postpartum anxiety workbook for new moms"
 ]
 
 def scan_niche_radar() -> list[dict]:
     """
-    Scans for high-velocity Kindle Unlimited opportunities:
-    1. Samples high-converting evergreen clusters.
-    2. Verifies queries against Amazon digital-text autocomplete.
-    3. Rejects ghost towns (< 4 books).
-    4. Enforces STRICT >= 80 threshold (Elite KU opportunities only).
+    Autonomous Persistent Hunter:
+    - Scans random clusters from the 50+ database.
+    - Tests candidate angles against Amazon digital-text autocomplete.
+    - Evaluates organic listings via DuckDuckGo.
+    - Sweeps continuously until it identifies at least 2 verified opportunities (>= 80/100).
+    - If 12 clusters are exhausted without clearing 80, returns top runner-ups (>= 75)
+      so the user always receives actionable data.
     """
     alerts = []
-    sampled_clusters = random.sample(GOLDEN_SEED_CLUSTERS, 5)
+    runner_ups = []
+    
+    shuffled_pool = random.sample(GOLDEN_SEED_CLUSTERS, len(GOLDEN_SEED_CLUSTERS))
+    max_clusters_to_sweep = 12
 
-    for cluster in sampled_clusters:
+    for cluster in shuffled_pool[:max_clusters_to_sweep]:
         queries = scout_seed_angles(cluster)
         verified_candidates = [q["query"] for q in queries if q["verified"]]
-        target_query = verified_candidates[0] if verified_candidates else queries[0]["query"]
+        candidates_to_test = verified_candidates if verified_candidates else [queries[0]["query"]]
 
-        books = harvest_organic_books(target_query, max_items=6)
-        metrics = compute_comprehensive_score(books, target_query)
+        for target_query in candidates_to_test[:2]:
+            books = harvest_organic_books(target_query, max_items=6)
+            metrics = compute_comprehensive_score(books, target_query)
 
-        # STRICT ELITE FILTER: Only 80+ scores pass
-        if not metrics.get("is_ghost_town") and metrics["total"] >= 80:
-            alerts.append({
+            if metrics.get("is_ghost_town"):
+                continue
+
+            entry = {
                 "topic": target_query,
                 "score": metrics["total"],
                 "demand": metrics["demand"],
@@ -473,8 +514,17 @@ def scan_niche_radar() -> list[dict]:
                 "est_monthly_kenp": metrics["kenp_metrics"]["monthly_single"],
                 "est_series_kenp": metrics["kenp_metrics"]["monthly_series_ecosystem"],
                 "avg_bsr": metrics["avg_bsr"]
-            })
-            if len(alerts) >= 2:
-                break
-            
-    return alerts
+            }
+
+            if metrics["total"] >= 80:
+                alerts.append(entry)
+                if len(alerts) >= 2:
+                    return alerts
+            elif metrics["total"] >= 75:
+                runner_ups.append(entry)
+
+    if alerts:
+        return alerts
+
+    runner_ups.sort(key=lambda x: x["score"], reverse=True)
+    return runner_ups[:2]
