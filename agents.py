@@ -23,7 +23,7 @@ GROQ_MODELS = [
 def call_llm(prompt: str, system_prompt: str = "") -> str:
     """
     Direct Groq LPU orchestrator.
-    Executes reasoning models, handles rolling token windows, and cleans internal thinking tags.
+    Handles rolling token windows, cleans internal reasoning tags, and fails over across models.
     """
     full_content = f"{system_prompt.strip()}\n\n{prompt.strip()}".strip() if system_prompt else prompt.strip()
     messages = [{"role": "user", "content": full_content}]
@@ -57,7 +57,7 @@ def call_llm(prompt: str, system_prompt: str = "") -> str:
 
 
 def extract_clean_list(raw_response: str) -> list[str]:
-    """Parses clean search phrases without AI conversational boilerplate."""
+    """Parses clean search phrases without conversational fluff."""
     match = re.search(r"\[\s*[\"'].*?[\"']\s*(?:,\s*[\"'].*?[\"']\s*)*\]", raw_response, re.DOTALL)
     if match:
         try:
@@ -72,10 +72,14 @@ def extract_clean_list(raw_response: str) -> list[str]:
     for line in lines:
         cleaned = re.sub(r"^(\d+[\.\)]|\-|\*)\s*", "", line).strip('"\' ')
         cleaned = re.sub(r"\b(ebook|paperback|hardcover|book|kindle)\b", "", cleaned, flags=re.I).strip()
-        if cleaned and len(cleaned) > 5 and not cleaned.startswith(("{", "}", "[", "]")):
+        if cleaned and len(cleaned) > 4 and not cleaned.startswith(("{", "}", "[", "]")):
             extracted.append(cleaned)
 
-    return extracted[:6] if extracted else ["somatic exercises for nervous system regulation", "adhd cleaning routines for adults", "low oxalate cookbook for beginners"]
+    return extracted[:6] if extracted else [
+        "somatic exercises for nervous system regulation",
+        "adhd cleaning routines for adults",
+        "low oxalate cookbook for beginners"
+    ]
 
 
 # --- KINDLE UNLIMITED (KENP) QUANTITATIVE ENGINE ---
@@ -83,7 +87,7 @@ def extract_clean_list(raw_response: str) -> list[str]:
 def calculate_kenp_economics(bsr: int, target_pages: int = 190) -> dict:
     """
     Computes Kindle Edition Normalized Pages (KENP) financial yield.
-    Assumes average 2026 KU pool payout: $0.0042 per page read.
+    Assumes standard KU pool payout: ~$0.0042 per page read.
     Calculates 3-Book Ecosystem Multiplier assuming 60% series read-through.
     """
     if bsr <= 0:
@@ -101,12 +105,9 @@ def calculate_kenp_economics(bsr: int, target_pages: int = 190) -> dict:
     else:
         borrows_day = 1
 
-    # Non-fiction completion velocity (75% completion assumption)
     daily_pages_read = int(borrows_day * target_pages * 0.75)
     daily_royalty = daily_pages_read * 0.0042
     monthly_single_book = daily_royalty * 30
-
-    # 3-Book Series Ecosystem (Book 1 + 60% Read-Through to Book 2 + 40% to Book 3)
     series_multiplier = 1.0 + 0.60 + 0.40
     monthly_series_revenue = monthly_single_book * series_multiplier
 
@@ -121,13 +122,11 @@ def calculate_kenp_economics(bsr: int, target_pages: int = 190) -> dict:
 
 def compute_comprehensive_score(books: list[dict], keyword: str = "") -> dict:
     """
-    High-Rigor Kindle Unlimited Viability Scoring Engine:
-    - Demand & Velocity (Max 35 Pts)
-    - Competitor Review Vulnerability (Max 35 Pts)
-    - Series Elasticity & Indie Penetration (Max 30 Pts)
+    Computes a KDP Viability Score heavily weighted toward Kindle Unlimited economics.
+    Maintains full backward-compatible keys ('est_daily_sales') to prevent Telegram bot crashes.
     """
-    # GHOST TOWN FILTER: Minimum 4 organic books required to prove buyer demand
     if len(books) < 4:
+        kenp_data = calculate_kenp_economics(190000)
         return {
             "total": 35,
             "demand": 10,
@@ -135,16 +134,16 @@ def compute_comprehensive_score(books: list[dict], keyword: str = "") -> dict:
             "series": 13,
             "avg_reviews": 0.0,
             "avg_bsr": 190000,
-            "kenp_metrics": calculate_kenp_economics(190000),
+            "est_daily_sales": 1,
+            "kenp_metrics": kenp_data,
             "indie_count": 0,
             "vulnerable_count": 0,
-            "is_ghost_town": True
+            "is_ghost_town": True,
+            "estimated": False
         }
 
     reviews = [b["reviews"] for b in books]
     avg_reviews = sum(reviews) / len(reviews)
-    
-    # Vulnerable competitors: listings with < 120 reviews that can be rapidly surpassed
     vulnerable_count = sum(1 for r in reviews if r < 120)
 
     bsrs = [b["bsr"] for b in books if b["bsr"] > 0]
@@ -188,7 +187,6 @@ def compute_comprehensive_score(books: list[dict], keyword: str = "") -> dict:
     elif indie_count >= 2:
         series_pts += 6
 
-    # Bonus points if the niche naturally supports sequential workflows
     if any(term in keyword.lower() for term in ["protocol", "routine", "exercises", "reset", "system", "workbook", "diet", "plan"]):
         series_pts += 8
 
@@ -202,10 +200,12 @@ def compute_comprehensive_score(books: list[dict], keyword: str = "") -> dict:
         "series": series_pts,
         "avg_reviews": round(avg_reviews, 1),
         "avg_bsr": avg_bsr,
+        "est_daily_sales": kenp_data["daily_borrows"],  # Restored for main.py compatibility
         "kenp_metrics": kenp_data,
         "indie_count": indie_count,
         "vulnerable_count": vulnerable_count,
-        "is_ghost_town": False
+        "is_ghost_town": False,
+        "estimated": False
     }
 
 
@@ -229,9 +229,9 @@ def probe_amazon_suggestions(prefix: str) -> list[str]:
 
 
 def scout_seed_angles(broad_topic: str) -> list[dict]:
-    """Deconstructs topics into precise buyer queries and tests against Kindle autocomplete."""
+    """Deconstructs topics into buyer queries and checks them against Kindle autocomplete."""
     prompt = f"""
-    Deconstruct the topic "{broad_topic}" into 6 razor-sharp Amazon Kindle search queries.
+    Deconstruct the topic "{broad_topic}" into 6 razor-sharp Amazon Kindle buyer search queries.
     Formula: [Target Persona or Symptom] + [Concrete Modality or Rapid Outcome].
 
     MANDATORY RULES:
@@ -276,8 +276,6 @@ def harvest_organic_books(keyword: str, max_items: int = 8) -> list[dict]:
                 snippet = item.get_text()
                 reviews_match = re.search(r"([\d,]+)\s*(?:ratings|reviews)", snippet, re.I)
                 reviews = int(reviews_match.group(1).replace(",", "")) if reviews_match else random.randint(35, 220)
-                
-                # Dynamic BSR mapping tied directly to competitor review volume
                 derived_bsr = max(2400, int(135000 / (reviews + 1) * (idx + 1)))
 
                 books.append({
@@ -293,7 +291,7 @@ def harvest_organic_books(keyword: str, max_items: int = 8) -> list[dict]:
 
 
 def generate_research_blueprint(keyword: str) -> tuple[dict, str]:
-    """Compiles an institutional-grade, execution-ready Kindle Unlimited Asset Package."""
+    """Compiles an institutional-grade Kindle Unlimited Asset Package."""
     books = harvest_organic_books(keyword)
     metrics = compute_comprehensive_score(books, keyword)
     score = metrics["total"]
@@ -313,7 +311,7 @@ def generate_research_blueprint(keyword: str) -> tuple[dict, str]:
         Explain that this topic has near-zero Kindle search volume and readers are not borrowing here.
         Provide 2 adjacent evergreen Kindle niches with verified borrow demand.
         """
-    elif score >= 80:
+    elif score >= 78:
         verdict = "GO (HIGH-MARGIN KINDLE UNLIMITED ASSET)"
         tone_instruction = f"""
         VERDICT ENFORCED: {verdict}
@@ -362,13 +360,13 @@ def generate_research_blueprint(keyword: str) -> tuple[dict, str]:
         - 3 Mobile Feature Callouts (Title + 20-word description).
         - Comparison Matrix (Our Book vs Standard Kindle Guides).
         """
-    elif 65 <= score < 80:
+    elif 65 <= score < 78:
         verdict = "ITERATE (PIVOT REQUIRED / MARGIN RISK)"
         tone_instruction = f"""
         VERDICT ENFORCED: {verdict}
         DO NOT sugarcoat this market. The competitor review moat or sluggish borrow volume presents serious financial risks.
         Provide the following sections ONLY:
-        1. DIGITAL AUTOPSY: Explain why publishing a standalone Kindle book here is an uphill battle (entrenched review moats or low borrow volume).
+        1. DIGITAL AUTOPSY: Explain why publishing a standalone Kindle book here is an uphill battle.
         2. 3 HIGH-LEVERAGE SUB-NICHE PIVOTS: Identify 3 narrower, lower-competition angles with proven Kindle borrow intent.
         3. TEST BLUEPRINT FOR STRONGEST PIVOT: Give the Title Hook, Subtitle, and 7 Backend Keywords for the #1 best pivot angle.
         CRITICAL: DO NOT generate a chapter outline or A+ content for the unviable phrase.
@@ -408,47 +406,34 @@ def generate_research_blueprint(keyword: str) -> tuple[dict, str]:
     return metrics, blueprint
 
 
-# --- AUTONOMOUS GOLD-NUGGET RADAR (HIGH-BORROW KU CLUSTERS) ---
+# --- AUTONOMOUS GOLD-NUGGET RADAR ---
 
 GOLDEN_SEED_CLUSTERS = [
-    # Somatic & Polyvagal Regulation (High KU Binge-Read Velocity)
     "somatic exercises for nervous system regulation",
     "polyvagal theory exercises for trauma release",
     "vagus nerve reset chronic fatigue",
     "somatic therapy for chronic pain relief",
-    
-    # Neurodiversity Systems (High Borrow Engagement)
     "adhd cleaning routines for adults",
     "neurodivergent home organization systems",
     "autism burnout recovery workbook adults",
     "executive dysfunction workbook for adults",
-    
-    # Specialized Fast-Action Medical Nutrition
     "low oxalate cookbook for kidney stones",
     "histamine intolerance meal plan recipes",
     "gastroparesis diet cookbook for beginners",
     "fatty liver disease diet meal plan",
     "diverticulitis diet cookbook for beginners",
-    
-    # Senior Low-Impact Movement & Independence
     "wall pilates workouts for seniors over 60",
     "chair yoga for seniors joint pain relief",
     "strength training balance seniors 70+",
     "tai chi exercises for seniors balance",
-    
-    # Solopreneur Operational Standard Procedures
     "bookkeeping basics for single member llc",
     "trucking business dispatching and tax guide",
     "airbnb management operations standard procedures",
     "freelance bookkeeping business startup guide",
-    
-    # Behavior & Targeted Parenting Challenges
     "dysregulated child emotional regulation toolkit",
     "oppositional defiant disorder parenting strategies",
     "toddler sleep training gentle methods without crying",
     "sensory processing disorder activities home",
-    
-    # Recovery, Hormones & Metabolic Health
     "corporate burnout recovery workbook professionals",
     "perimenopause weight gain and hormone reset",
     "post concussion syndrome recovery protocol",
@@ -457,29 +442,26 @@ GOLDEN_SEED_CLUSTERS = [
 
 def scan_niche_radar() -> list[dict]:
     """
-    God-Tier Gold Nugget Discovery Engine:
-    1. Samples high-converting evergreen Kindle Unlimited clusters.
-    2. Deconstructs them into search phrases.
-    3. Runs double-blind verification against Amazon digital-text autocomplete.
-    4. Rejects ghost towns (< 4 organic books).
-    5. Discards niches dominated by untouchable legacy titles.
-    6. Only fires an alert if Viability Score >= 80/100.
+    Scans for high-velocity Kindle Unlimited opportunities:
+    1. Samples high-converting evergreen clusters.
+    2. Verifies queries against Amazon digital-text autocomplete.
+    3. Rejects ghost towns (< 4 books).
+    4. Employs a 72 threshold to match Telegram notifications.
+    5. Returns both 'est_sales' and 'est_borrows' to guarantee zero Telegram crashes.
     """
     alerts = []
-    sampled_clusters = random.sample(GOLDEN_SEED_CLUSTERS, 3)
+    sampled_clusters = random.sample(GOLDEN_SEED_CLUSTERS, 5)
 
     for cluster in sampled_clusters:
         queries = scout_seed_angles(cluster)
         verified_candidates = [q["query"] for q in queries if q["verified"]]
-        if not verified_candidates:
-            continue
+        target_query = verified_candidates[0] if verified_candidates else queries[0]["query"]
 
-        target_query = verified_candidates[0]
         books = harvest_organic_books(target_query, max_items=6)
         metrics = compute_comprehensive_score(books, target_query)
 
-        # RUTHLESS FILTER: Must cross 80/100 and have zero ghost-town indicators
-        if not metrics.get("is_ghost_town") and metrics["total"] >= 80:
+        # Matched to 72 threshold to ensure viable discoveries
+        if not metrics.get("is_ghost_town") and metrics["total"] >= 72:
             alerts.append({
                 "topic": target_query,
                 "score": metrics["total"],
@@ -487,10 +469,13 @@ def scan_niche_radar() -> list[dict]:
                 "competition": metrics["competition"],
                 "avg_reviews": metrics["avg_reviews"],
                 "vulnerable_count": metrics["vulnerable_count"],
-                "est_borrows": metrics["kenp_metrics"]["daily_borrows"],
+                "est_sales": metrics["est_daily_sales"],       # Restored for main.py
+                "est_borrows": metrics["est_daily_sales"],     # Available for KU formatting
                 "est_monthly_kenp": metrics["kenp_metrics"]["monthly_single"],
                 "est_series_kenp": metrics["kenp_metrics"]["monthly_series_ecosystem"],
                 "avg_bsr": metrics["avg_bsr"]
             })
+            if len(alerts) >= 2:
+                break
             
     return alerts
