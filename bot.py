@@ -3,6 +3,7 @@ import io
 import re
 import json
 import asyncio
+import urllib.parse
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -21,11 +22,11 @@ load_dotenv()
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 SUBSCRIBERS_FILE = "subscribers.json"
-SENT_ALERTS_CACHE = set()
+ALERTS_CACHE_FILE = "alerts_cache.json"
 
 
 def load_subscribers() -> set:
-    """Loads subscribed Telegram chat IDs from disk to survive Railway restarts."""
+    """Loads subscriber chat IDs from persistent storage."""
     if os.path.exists(SUBSCRIBERS_FILE):
         try:
             with open(SUBSCRIBERS_FILE, "r", encoding="utf-8") as f:
@@ -37,7 +38,7 @@ def load_subscribers() -> set:
 
 
 def save_subscriber(chat_id: int):
-    """Persists a new chat ID to disk."""
+    """Saves a new chat ID to persistent storage."""
     subscribers = load_subscribers()
     if chat_id not in subscribers:
         subscribers.add(chat_id)
@@ -45,19 +46,41 @@ def save_subscriber(chat_id: int):
             json.dump(list(subscribers), f)
 
 
+def load_alerts_cache() -> set:
+    """Loads sent alerts to prevent duplicate notifications across restarts."""
+    if os.path.exists(ALERTS_CACHE_FILE):
+        try:
+            with open(ALERTS_CACHE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return set(data) if isinstance(data, list) else set()
+        except Exception:
+            pass
+    return set()
+
+
+def cache_alert(topic: str):
+    """Appends an alert topic to persistent cache."""
+    cache = load_alerts_cache()
+    clean_topic = topic.strip().lower()
+    if clean_topic not in cache:
+        cache.add(clean_topic)
+        with open(ALERTS_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(cache), f)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Registers chat permanently for 24/7 radar alerts and displays instructions."""
+    """Registers chat and outputs the command interface."""
     chat_id = update.effective_chat.id
     save_subscriber(chat_id)
     
     welcome_msg = (
-        "🚀 *KDP Agent Studio Pro — 24/7 Discovery Engine Active*\n\n"
+        "🚀 *KDP Agent Studio Pro — High-Yield Discovery Engine Active*\n\n"
         "*Available Commands:*\n"
-        "• `/scout <broad topic>` — Generate & verify 6 commercial search queries\n"
-        "• `/research <query>` — Pull market data, score, & generate Full Asset Package\n"
-        "• `/radar` — Trigger an immediate sweep on demand\n\n"
-        "🛰️ *Autonomous 24/7 Radar:* LOCKED ON. Your chat is registered. "
-        "The agent sweeps high-converting non-fiction clusters every *30 minutes* and pings you whenever a *≥ 80/100* gold nugget is detected."
+        "• `/scout <topic>` — Deconstruct & verify commercial search queries\n"
+        "• `/research <query>` — Pull market data, score, & generate full asset package\n"
+        "• `/radar` — Trigger an immediate sweep of evergreen non-fiction niches\n\n"
+        "📡 *24/7 Autonomous Radar:* LOCKED ON. Your chat is registered.\n"
+        "The agent sweeps high-converting non-fiction clusters every *30 minutes* and pings you whenever an *≥ 80/100* opportunity is detected."
     )
     await update.message.reply_text(welcome_msg, parse_mode="Markdown")
 
@@ -83,7 +106,13 @@ async def scout(update: Update, context: ContextTypes.DEFAULT_TYPE):
             suggestions_text = f"Suggestions: {', '.join(res['suggestions'])}" if res["suggestions"] else "Suggestions: None"
 
             reply_lines.append(f"{i}. *{query}*\n   {status_emoji} — _{suggestions_text}_")
-            keyboard.append([InlineKeyboardButton(f"Research #{i}: {query[:32]}...", callback_data=f"res_{i}")])
+            
+            # Action row: Research button + Direct Amazon search link
+            amz_url = f"https://www.amazon.com/s?k={urllib.parse.quote_plus(query)}&i=digital-text"
+            keyboard.append([
+                InlineKeyboardButton(f"📊 Blueprint #{i}", callback_data=f"res_{i}"),
+                InlineKeyboardButton("🛒 Amazon Live", url=amz_url)
+            ])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
         await status_msg.edit_text("\n".join(reply_lines), reply_markup=reply_markup, parse_mode="Markdown")
@@ -92,8 +121,12 @@ async def scout(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_research_execution(query: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Runs data pipeline and delivers the summary card + downloadable .md file."""
-    status_msg = await context.bot.send_message(chat_id=chat_id, text=f"📊 Harvesting Kindle metrics & generating asset package for:\n*{query}*...", parse_mode="Markdown")
+    """Executes market analysis and uploads the markdown asset package."""
+    status_msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"📊 Harvesting Kindle metrics & generating asset package for:\n*{query}*...",
+        parse_mode="Markdown"
+    )
 
     try:
         metrics, blueprint = await asyncio.to_thread(generate_research_blueprint, query)
@@ -127,7 +160,7 @@ async def handle_research_execution(query: str, chat_id: int, context: ContextTy
 
 
 async def research(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manual trigger for research command."""
+    """Manual research trigger."""
     if not context.args:
         await update.message.reply_text("Usage: `/research <query>`", parse_mode="Markdown")
         return
@@ -136,7 +169,7 @@ async def research(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles clicks from Scout and Radar inline buttons."""
+    """Handles Scout and Radar inline callbacks."""
     query = update.callback_query
     await query.answer()
 
@@ -151,11 +184,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if search_query:
         await handle_research_execution(search_query, query.message.chat_id, context)
     else:
-        await query.message.reply_text("Session expired. Please run the command again.")
+        await query.message.reply_text("Session expired. Please trigger the command again.")
 
 
 async def radar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """On-demand radar scan trigger."""
+    """On-demand radar execution."""
     status_msg = await update.message.reply_text("📡 *Sweeping evergreen Kindle Unlimited clusters (≥ 80/100 threshold)...*", parse_mode="Markdown")
     try:
         alerts = await asyncio.to_thread(scan_niche_radar)
@@ -174,7 +207,10 @@ async def radar(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"   • *Est. 3-Book Ecosystem:* ~${a['est_series_kenp']}/mo\n"
             )
             context.user_data[f"rad_{i}"] = a["topic"]
-            keyboard.append([InlineKeyboardButton(f"Research: {a['topic'][:32]}...", callback_data=f"rad_{i}")])
+            keyboard.append([
+                InlineKeyboardButton(f"📊 Blueprint: {a['topic'][:24]}...", callback_data=f"rad_{i}"),
+                InlineKeyboardButton("🛒 Amazon Live", url=a["amazon_url"])
+            ])
 
         await status_msg.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     except Exception as e:
@@ -184,8 +220,7 @@ async def radar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def radar_background_job(context: ContextTypes.DEFAULT_TYPE):
     """
     24/7 Autonomous Background Hunter:
-    Runs every 30 minutes. Sweeps clusters, verifies search intent, and pings
-    all subscribed users when fresh >= 80/100 gold nuggets are uncovered.
+    Sweeps clusters every 30 minutes, validates intent, and dispatches new opportunities.
     """
     subscribers = load_subscribers()
     if not subscribers:
@@ -194,13 +229,14 @@ async def radar_background_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         alerts = await asyncio.to_thread(scan_niche_radar)
         if alerts:
+            sent_cache = load_alerts_cache()
+
             for a in alerts:
                 topic_key = a["topic"].strip().lower()
-                
-                # Deduplication cache check
-                if topic_key in SENT_ALERTS_CACHE:
+                if topic_key in sent_cache:
                     continue
-                SENT_ALERTS_CACHE.add(topic_key)
+
+                cache_alert(topic_key)
 
                 alert_text = (
                     f"🚨 *24/7 Autonomous Radar Alert — Gold Nugget Detected!*\n\n"
@@ -208,15 +244,24 @@ async def radar_background_job(context: ContextTypes.DEFAULT_TYPE):
                     f"• *Viability Score:* *{a['score']}/100*\n"
                     f"• *Est. Borrows Velocity:* ~{a['est_borrows']} borrows/day\n"
                     f"• *Est. Competitor BSR:* #{a['avg_bsr']:,}\n"
-                    f"• *Est. Single Book Monthly Royalty:* ~${a['est_monthly_kenp']}/mo\n"
-                    f"• *Est. 3-Book Ecosystem Monthly:* ~${a['est_series_kenp']}/mo\n"
-                    f"• *Average Competitor Reviews:* {a['avg_reviews']} ({a['vulnerable_count']} vulnerable)\n\n"
-                    f"👉 Run `/research {a['topic']}` to generate the complete publishing asset package."
+                    f"• *Est. Single Book Royalty:* ~${a['est_monthly_kenp']}/mo\n"
+                    f"• *Est. 3-Book Ecosystem:* ~${a['est_series_kenp']}/mo\n"
+                    f"• *Average Reviews:* {a['avg_reviews']} ({a['vulnerable_count']} vulnerable)\n\n"
+                    f"👉 Run `/research {a['topic']}` to generate the publishing asset package."
                 )
+
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🛒 View on Amazon Live", url=a["amazon_url"])]
+                ])
 
                 for chat_id in subscribers:
                     try:
-                        await context.bot.send_message(chat_id=chat_id, text=alert_text, parse_mode="Markdown")
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=alert_text,
+                            reply_markup=keyboard,
+                            parse_mode="Markdown"
+                        )
                     except Exception as send_err:
                         print(f"Could not dispatch alert to chat {chat_id}: {send_err}")
 
@@ -225,7 +270,7 @@ async def radar_background_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    """Starts the bot with polling and initializes the 30-minute background job."""
+    """Initializes polling and sets the repeating 30-minute background job."""
     if not TOKEN:
         raise ValueError("Missing TELEGRAM_BOT_TOKEN environment variable in Railway.")
 
@@ -237,7 +282,6 @@ def main():
     app.add_handler(CommandHandler("radar", radar))
     app.add_handler(CallbackQueryHandler(button_callback))
 
-    # Autonomous Sweep: runs every 1,800 seconds (30 minutes), starts 30 seconds after launch
     if app.job_queue:
         app.job_queue.run_repeating(radar_background_job, interval=1800, first=30)
 
