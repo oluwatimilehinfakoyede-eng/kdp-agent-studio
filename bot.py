@@ -1,6 +1,8 @@
 import os
 import io
 import re
+import json
+import asyncio
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -18,20 +20,44 @@ from agents import (
 load_dotenv()
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-SUBSCRIBED_CHATS = set()
+SUBSCRIBERS_FILE = "subscribers.json"
+SENT_ALERTS_CACHE = set()
+
+
+def load_subscribers() -> set:
+    """Loads subscribed Telegram chat IDs from disk to survive Railway restarts."""
+    if os.path.exists(SUBSCRIBERS_FILE):
+        try:
+            with open(SUBSCRIBERS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return set(data) if isinstance(data, list) else set()
+        except Exception:
+            pass
+    return set()
+
+
+def save_subscriber(chat_id: int):
+    """Persists a new chat ID to disk."""
+    subscribers = load_subscribers()
+    if chat_id not in subscribers:
+        subscribers.add(chat_id)
+        with open(SUBSCRIBERS_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(subscribers), f)
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sends the command directory and registers chat for radar alerts."""
+    """Registers chat permanently for 24/7 radar alerts and displays instructions."""
     chat_id = update.effective_chat.id
-    SUBSCRIBED_CHATS.add(chat_id)
+    save_subscriber(chat_id)
     
     welcome_msg = (
-        "🚀 *KDP Agent Studio Pro Active*\n\n"
+        "🚀 *KDP Agent Studio Pro — 24/7 Discovery Engine Active*\n\n"
         "*Available Commands:*\n"
         "• `/scout <broad topic>` — Generate & verify 6 commercial search queries\n"
         "• `/research <query>` — Pull market data, score, & generate Full Asset Package\n"
-        "• `/radar` — Trigger an immediate sweep of evergreen non-fiction niches\n\n"
-        "📡 *Autonomous Radar:* Active in background. Alerts are sent automatically when *≥ 80/100* opportunity niches are found."
+        "• `/radar` — Trigger an immediate sweep on demand\n\n"
+        "🛰️ *Autonomous 24/7 Radar:* LOCKED ON. Your chat is registered. "
+        "The agent sweeps high-converting non-fiction clusters every *30 minutes* and pings you whenever a *≥ 80/100* gold nugget is detected."
     )
     await update.message.reply_text(welcome_msg, parse_mode="Markdown")
 
@@ -39,14 +65,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def scout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Generates 6 verified buyer search queries."""
     if not context.args:
-        await update.message.reply_text("Usage: `/scout <topic>`\nExample: `/scout container gardening for apartments`", parse_mode="Markdown")
+        await update.message.reply_text("Usage: `/scout <topic>`\nExample: `/scout low oxalate cookbook`", parse_mode="Markdown")
         return
 
     broad_topic = " ".join(context.args)
     status_msg = await update.message.reply_text(f"🔍 Scouting verified angles for: *{broad_topic}*...", parse_mode="Markdown")
 
     try:
-        results = scout_seed_angles(broad_topic)
+        results = await asyncio.to_thread(scout_seed_angles, broad_topic)
         keyboard = []
         reply_lines = [f"🎯 *Scouted Buyer Queries for:* _{broad_topic}_\n"]
 
@@ -67,10 +93,10 @@ async def scout(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_research_execution(query: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     """Runs data pipeline and delivers the summary card + downloadable .md file."""
-    status_msg = await context.bot.send_message(chat_id=chat_id, text=f"📊 Harvesting data & generating asset package for:\n*{query}*...", parse_mode="Markdown")
+    status_msg = await context.bot.send_message(chat_id=chat_id, text=f"📊 Harvesting Kindle metrics & generating asset package for:\n*{query}*...", parse_mode="Markdown")
 
     try:
-        metrics, blueprint = generate_research_blueprint(query)
+        metrics, blueprint = await asyncio.to_thread(generate_research_blueprint, query)
 
         summary_card = (
             f"📈 *KDP Opportunity Report: {query}*\n\n"
@@ -86,7 +112,6 @@ async def handle_research_execution(query: str, chat_id: int, context: ContextTy
         )
         await status_msg.edit_text(summary_card, parse_mode="Markdown")
 
-        # Package full deliverable as a clean Markdown document
         clean_filename = re.sub(r"[^\w\s-]", "", query).strip().replace(" ", "_")[:40]
         file_bytes = io.BytesIO(blueprint.encode("utf-8"))
         file_bytes.name = f"KDP_Blueprint_{clean_filename}.md"
@@ -111,7 +136,7 @@ async def research(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles clicks from Scout AND Radar inline buttons cleanly without collisions."""
+    """Handles clicks from Scout and Radar inline buttons."""
     query = update.callback_query
     await query.answer()
 
@@ -130,10 +155,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def radar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """On-demand radar scan trigger with persistent search guarantee."""
+    """On-demand radar scan trigger."""
     status_msg = await update.message.reply_text("📡 *Sweeping evergreen Kindle Unlimited clusters (≥ 80/100 threshold)...*", parse_mode="Markdown")
     try:
-        alerts = scan_niche_radar()
+        alerts = await asyncio.to_thread(scan_niche_radar)
         if not alerts:
             await status_msg.edit_text("📡 Radar sweep complete. No angles met criteria on this pass. Running next sweep cycle.", parse_mode="Markdown")
             return
@@ -157,31 +182,53 @@ async def radar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def radar_background_job(context: ContextTypes.DEFAULT_TYPE):
-    """Background task executed every 12 hours to alert subscribed users."""
-    if not SUBSCRIBED_CHATS:
+    """
+    24/7 Autonomous Background Hunter:
+    Runs every 30 minutes. Sweeps clusters, verifies search intent, and pings
+    all subscribed users when fresh >= 80/100 gold nuggets are uncovered.
+    """
+    subscribers = load_subscribers()
+    if not subscribers:
         return
 
     try:
-        alerts = scan_niche_radar()
+        alerts = await asyncio.to_thread(scan_niche_radar)
         if alerts:
-            for chat_id in SUBSCRIBED_CHATS:
-                for a in alerts:
-                    alert_text = (
-                        f"🚨 *Radar Alert: High-Potential Niche Found!*\n\n"
-                        f"• *Topic:* {a['topic']}\n"
-                        f"• *Score:* {a['score']}/100\n"
-                        f"• *Est. Daily Borrows:* ~{a['est_borrows']} borrows/day\n"
-                        f"• *Est. Single Book Royalty:* ~${a['est_monthly_kenp']}/mo\n"
-                        f"• *Est. 3-Book Ecosystem:* ~${a['est_series_kenp']}/mo\n\n"
-                        f"Run `/research {a['topic']}` to generate the publishing package."
-                    )
-                    await context.bot.send_message(chat_id=chat_id, text=alert_text, parse_mode="Markdown")
+            for a in alerts:
+                topic_key = a["topic"].strip().lower()
+                
+                # Deduplication cache check
+                if topic_key in SENT_ALERTS_CACHE:
+                    continue
+                SENT_ALERTS_CACHE.add(topic_key)
+
+                alert_text = (
+                    f"🚨 *24/7 Autonomous Radar Alert — Gold Nugget Detected!*\n\n"
+                    f"• *Topic:* `{a['topic']}`\n"
+                    f"• *Viability Score:* *{a['score']}/100*\n"
+                    f"• *Est. Borrows Velocity:* ~{a['est_borrows']} borrows/day\n"
+                    f"• *Est. Competitor BSR:* #{a['avg_bsr']:,}\n"
+                    f"• *Est. Single Book Monthly Royalty:* ~${a['est_monthly_kenp']}/mo\n"
+                    f"• *Est. 3-Book Ecosystem Monthly:* ~${a['est_series_kenp']}/mo\n"
+                    f"• *Average Competitor Reviews:* {a['avg_reviews']} ({a['vulnerable_count']} vulnerable)\n\n"
+                    f"👉 Run `/research {a['topic']}` to generate the complete publishing asset package."
+                )
+
+                for chat_id in subscribers:
+                    try:
+                        await context.bot.send_message(chat_id=chat_id, text=alert_text, parse_mode="Markdown")
+                    except Exception as send_err:
+                        print(f"Could not dispatch alert to chat {chat_id}: {send_err}")
+
     except Exception as e:
-        print(f"Background radar notice: {e}")
+        print(f"Autonomous 24/7 background radar notice: {e}")
 
 
 def main():
-    """Starts the bot with polling and initializes the background radar job."""
+    """Starts the bot with polling and initializes the 30-minute background job."""
+    if not TOKEN:
+        raise ValueError("Missing TELEGRAM_BOT_TOKEN environment variable in Railway.")
+
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -190,10 +237,11 @@ def main():
     app.add_handler(CommandHandler("radar", radar))
     app.add_handler(CallbackQueryHandler(button_callback))
 
+    # Autonomous Sweep: runs every 1,800 seconds (30 minutes), starts 30 seconds after launch
     if app.job_queue:
-        app.job_queue.run_repeating(radar_background_job, interval=43200, first=30)
+        app.job_queue.run_repeating(radar_background_job, interval=1800, first=30)
 
-    print("KDP Bot Pro is live and polling. Send /start in Telegram.")
+    print("KDP Bot Pro 24/7 Engine is online (30-minute cycle). Send /start in Telegram.")
     app.run_polling()
 
 
