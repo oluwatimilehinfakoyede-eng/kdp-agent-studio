@@ -32,7 +32,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/scout <broad topic>` — Generate & verify 6 commercial search queries\n"
         "• `/research <query>` — Pull market data, score, & generate Full Asset Package\n"
         "• `/radar` — Trigger an immediate sweep of evergreen non-fiction niches\n\n"
-        "📡 *Autonomous Radar:* Active in background. Alerts are sent automatically when $\\ge 72/100$ opportunity niches are found."
+        "📡 *Autonomous Radar:* Active in background. Alerts are sent automatically when $\\ge 80/100$ opportunity niches are found."
     )
     await update.message.reply_text(welcome_msg, parse_mode="Markdown")
 
@@ -131,7 +131,7 @@ async def radar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         alerts = scan_niche_radar()
         if not alerts:
-            await status_msg.edit_text("📡 Radar sweep complete. No evergreen angles passed the 72/100 threshold on this pass. Running next sweep cycle.")
+            await status_msg.edit_text("📡 Radar sweep complete. No evergreen angles passed the 80/100 threshold on this pass. Running next sweep cycle.")
             return
 
         lines = ["🚨 *High-Opportunity Niches Detected by Radar:*\n"]
