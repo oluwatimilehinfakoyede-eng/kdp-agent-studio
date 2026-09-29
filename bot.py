@@ -1,7 +1,6 @@
 import os
 import io
 import re
-import asyncio
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -28,11 +27,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     welcome_msg = (
         "🚀 *KDP Agent Studio Pro Active*\n\n"
-        "Available Commands:\n"
+        "*Available Commands:*\n"
         "• `/scout <broad topic>` — Generate & verify 6 commercial search queries\n"
         "• `/research <query>` — Pull market data, score, & generate Full Asset Package\n"
         "• `/radar` — Trigger an immediate sweep of evergreen non-fiction niches\n\n"
-        "📡 *Autonomous Radar:* Active in background. Alerts are sent automatically when $\\ge 80/100$ opportunity niches are found."
+        "📡 *Autonomous Radar:* Active in background. Alerts are sent automatically when *≥ 80/100* opportunity niches are found."
     )
     await update.message.reply_text(welcome_msg, parse_mode="Markdown")
 
@@ -58,7 +57,7 @@ async def scout(update: Update, context: ContextTypes.DEFAULT_TYPE):
             suggestions_text = f"Suggestions: {', '.join(res['suggestions'])}" if res["suggestions"] else "Suggestions: None"
 
             reply_lines.append(f"{i}. *{query}*\n   {status_emoji} — _{suggestions_text}_")
-            keyboard.append([InlineKeyboardButton(f"Research #{i}: {query[:35]}...", callback_data=f"res_{i}")])
+            keyboard.append([InlineKeyboardButton(f"Research #{i}: {query[:32]}...", callback_data=f"res_{i}")])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
         await status_msg.edit_text("\n".join(reply_lines), reply_markup=reply_markup, parse_mode="Markdown")
@@ -76,11 +75,11 @@ async def handle_research_execution(query: str, chat_id: int, context: ContextTy
         summary_card = (
             f"📈 *KDP Opportunity Report: {query}*\n\n"
             f"• *Viability Score:* {metrics['total']}/100\n"
-            f"  - Demand: {metrics['demand']}/40\n"
+            f"  - Demand: {metrics['demand']}/35\n"
             f"  - Competition Barrier: {metrics['competition']}/35\n"
-            f"  - Series Potential: {metrics['series']}/25\n"
+            f"  - Series Potential: {metrics['series']}/30\n"
             f"• *Est. Competitor Avg BSR:* #{metrics['avg_bsr']:,}\n"
-            f"• *Est. Daily Sales Velocity:* ~{metrics['est_daily_sales']} copies/day\n"
+            f"• *Est. Daily Borrows Velocity:* ~{metrics['est_daily_sales']} borrows/day\n"
             f"• *Top-Ranked Indie Books:* {metrics['indie_count']}\n"
             f"• *Avg Reviews (Top 8):* {metrics['avg_reviews']}\n\n"
             f"📁 *Complete Production Package Attached Below:*"
@@ -112,38 +111,45 @@ async def research(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles clicks from Scout inline buttons."""
+    """Handles clicks from Scout AND Radar inline buttons cleanly without collisions."""
     query = update.callback_query
     await query.answer()
 
-    index = query.data.split("_")[1]
-    search_query = context.user_data.get(f"q_{index}")
+    data = query.data
+    prefix, index = data.split("_")
+
+    if prefix == "rad":
+        search_query = context.user_data.get(f"rad_{index}")
+    else:
+        search_query = context.user_data.get(f"q_{index}")
 
     if search_query:
         await handle_research_execution(search_query, query.message.chat_id, context)
     else:
-        await query.message.reply_text("Query session expired. Please run /scout again.")
+        await query.message.reply_text("Session expired. Please run the command again.")
 
 
 async def radar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """On-demand radar scan trigger."""
-    status_msg = await update.message.reply_text("📡 *Sweeping evergreen niches for high-yield opportunities...*", parse_mode="Markdown")
+    """On-demand radar scan trigger with persistent search guarantee."""
+    status_msg = await update.message.reply_text("📡 *Sweeping evergreen Kindle Unlimited clusters (≥ 80/100 threshold)...*", parse_mode="Markdown")
     try:
         alerts = scan_niche_radar()
         if not alerts:
-            await status_msg.edit_text("📡 Radar sweep complete. No evergreen angles passed the 80/100 threshold on this pass. Running next sweep cycle.")
+            await status_msg.edit_text("📡 Radar sweep complete. No angles met criteria on this pass. Running next sweep cycle.", parse_mode="Markdown")
             return
 
-        lines = ["🚨 *High-Opportunity Niches Detected by Radar:*\n"]
+        lines = ["🚨 *High-Opportunity Niches Detected by Radar (≥ 80/100):*\n"]
         keyboard = []
         for i, a in enumerate(alerts, 1):
             lines.append(
                 f"{i}. *{a['topic']}*\n"
-                f"   • Score: *{a['score']}/100* | Est. BSR: #{a['avg_bsr']:,} (~{a['est_sales']} sales/day)\n"
-                f"   • Avg Reviews: {a['avg_reviews']}\n"
+                f"   • *Score:* {a['score']}/100 | *Est. BSR:* #{a['avg_bsr']:,} (~{a['est_borrows']} borrows/day)\n"
+                f"   • *Reviews:* {a['avg_reviews']} | *Vulnerable Competitors:* {a['vulnerable_count']}\n"
+                f"   • *Est. Single Book Royalty:* ~${a['est_monthly_kenp']}/mo\n"
+                f"   • *Est. 3-Book Ecosystem:* ~${a['est_series_kenp']}/mo\n"
             )
             context.user_data[f"rad_{i}"] = a["topic"]
-            keyboard.append([InlineKeyboardButton(f"Research: {a['topic'][:30]}...", callback_data=f"rad_{i}")])
+            keyboard.append([InlineKeyboardButton(f"Research: {a['topic'][:32]}...", callback_data=f"rad_{i}")])
 
         await status_msg.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     except Exception as e:
@@ -164,8 +170,9 @@ async def radar_background_job(context: ContextTypes.DEFAULT_TYPE):
                         f"🚨 *Radar Alert: High-Potential Niche Found!*\n\n"
                         f"• *Topic:* {a['topic']}\n"
                         f"• *Score:* {a['score']}/100\n"
-                        f"• *Est. Daily Sales:* ~{a['est_sales']} copies/day\n"
-                        f"• *Avg Competitor Reviews:* {a['avg_reviews']}\n\n"
+                        f"• *Est. Daily Borrows:* ~{a['est_borrows']} borrows/day\n"
+                        f"• *Est. Single Book Royalty:* ~${a['est_monthly_kenp']}/mo\n"
+                        f"• *Est. 3-Book Ecosystem:* ~${a['est_series_kenp']}/mo\n\n"
                         f"Run `/research {a['topic']}` to generate the publishing package."
                     )
                     await context.bot.send_message(chat_id=chat_id, text=alert_text, parse_mode="Markdown")
@@ -183,7 +190,6 @@ def main():
     app.add_handler(CommandHandler("radar", radar))
     app.add_handler(CallbackQueryHandler(button_callback))
 
-    # Autonomous Radar: runs every 12 hours (43,200 seconds), first run after 30 seconds
     if app.job_queue:
         app.job_queue.run_repeating(radar_background_job, interval=43200, first=30)
 
