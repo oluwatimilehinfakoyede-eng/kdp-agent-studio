@@ -23,7 +23,7 @@ GROQ_MODELS = [
 def call_llm(prompt: str, system_prompt: str = "") -> str:
     """
     Direct Groq LPU orchestrator.
-    Handles rolling token windows, cleans internal reasoning tags, and fails over across models.
+    Executes reasoning models, handles rolling token windows, and cleans internal thinking tags.
     """
     full_content = f"{system_prompt.strip()}\n\n{prompt.strip()}".strip() if system_prompt else prompt.strip()
     messages = [{"role": "user", "content": full_content}]
@@ -57,7 +57,7 @@ def call_llm(prompt: str, system_prompt: str = "") -> str:
 
 
 def extract_clean_list(raw_response: str) -> list[str]:
-    """Parses clean search phrases without conversational fluff."""
+    """Parses clean search phrases without conversational boilerplate."""
     match = re.search(r"\[\s*[\"'].*?[\"']\s*(?:,\s*[\"'].*?[\"']\s*)*\]", raw_response, re.DOTALL)
     if match:
         try:
@@ -123,7 +123,7 @@ def calculate_kenp_economics(bsr: int, target_pages: int = 190) -> dict:
 def compute_comprehensive_score(books: list[dict], keyword: str = "") -> dict:
     """
     Computes a KDP Viability Score heavily weighted toward Kindle Unlimited economics.
-    Maintains full backward-compatible keys ('est_daily_sales') to prevent Telegram bot crashes.
+    Maintains full backward compatibility for main.py with 'est_daily_sales'.
     """
     if len(books) < 4:
         kenp_data = calculate_kenp_economics(190000)
@@ -200,7 +200,7 @@ def compute_comprehensive_score(books: list[dict], keyword: str = "") -> dict:
         "series": series_pts,
         "avg_reviews": round(avg_reviews, 1),
         "avg_bsr": avg_bsr,
-        "est_daily_sales": kenp_data["daily_borrows"],  # Restored for main.py compatibility
+        "est_daily_sales": kenp_data["daily_borrows"],
         "kenp_metrics": kenp_data,
         "indie_count": indie_count,
         "vulnerable_count": vulnerable_count,
@@ -311,7 +311,7 @@ def generate_research_blueprint(keyword: str) -> tuple[dict, str]:
         Explain that this topic has near-zero Kindle search volume and readers are not borrowing here.
         Provide 2 adjacent evergreen Kindle niches with verified borrow demand.
         """
-    elif score >= 78:
+    elif score >= 80:
         verdict = "GO (HIGH-MARGIN KINDLE UNLIMITED ASSET)"
         tone_instruction = f"""
         VERDICT ENFORCED: {verdict}
@@ -360,7 +360,7 @@ def generate_research_blueprint(keyword: str) -> tuple[dict, str]:
         - 3 Mobile Feature Callouts (Title + 20-word description).
         - Comparison Matrix (Our Book vs Standard Kindle Guides).
         """
-    elif 65 <= score < 78:
+    elif 65 <= score < 80:
         verdict = "ITERATE (PIVOT REQUIRED / MARGIN RISK)"
         tone_instruction = f"""
         VERDICT ENFORCED: {verdict}
@@ -406,7 +406,7 @@ def generate_research_blueprint(keyword: str) -> tuple[dict, str]:
     return metrics, blueprint
 
 
-# --- AUTONOMOUS GOLD-NUGGET RADAR ---
+# --- AUTONOMOUS GOLD-NUGGET RADAR (HIGH-BORROW KU CLUSTERS) ---
 
 GOLDEN_SEED_CLUSTERS = [
     "somatic exercises for nervous system regulation",
@@ -446,8 +446,7 @@ def scan_niche_radar() -> list[dict]:
     1. Samples high-converting evergreen clusters.
     2. Verifies queries against Amazon digital-text autocomplete.
     3. Rejects ghost towns (< 4 books).
-    4. Employs a 72 threshold to match Telegram notifications.
-    5. Returns both 'est_sales' and 'est_borrows' to guarantee zero Telegram crashes.
+    4. Enforces STRICT >= 80 threshold (Elite KU opportunities only).
     """
     alerts = []
     sampled_clusters = random.sample(GOLDEN_SEED_CLUSTERS, 5)
@@ -460,8 +459,8 @@ def scan_niche_radar() -> list[dict]:
         books = harvest_organic_books(target_query, max_items=6)
         metrics = compute_comprehensive_score(books, target_query)
 
-        # Matched to 72 threshold to ensure viable discoveries
-        if not metrics.get("is_ghost_town") and metrics["total"] >= 72:
+        # STRICT ELITE FILTER: Only 80+ scores pass
+        if not metrics.get("is_ghost_town") and metrics["total"] >= 80:
             alerts.append({
                 "topic": target_query,
                 "score": metrics["total"],
@@ -469,8 +468,8 @@ def scan_niche_radar() -> list[dict]:
                 "competition": metrics["competition"],
                 "avg_reviews": metrics["avg_reviews"],
                 "vulnerable_count": metrics["vulnerable_count"],
-                "est_sales": metrics["est_daily_sales"],       # Restored for main.py
-                "est_borrows": metrics["est_daily_sales"],     # Available for KU formatting
+                "est_sales": metrics["est_daily_sales"],
+                "est_borrows": metrics["est_daily_sales"],
                 "est_monthly_kenp": metrics["kenp_metrics"]["monthly_single"],
                 "est_series_kenp": metrics["kenp_metrics"]["monthly_series_ecosystem"],
                 "avg_bsr": metrics["avg_bsr"]
