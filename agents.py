@@ -164,7 +164,7 @@ def estimate_bsr_from_reviews(reviews) -> int:
     """
     Inverse power-law BSR estimation grounded in empirical KDP distributions:
         BSR ~ 150000 / reviews^0.6
-    Replaces the old hardcoded index arrays (a hallucination vector).
+    Used ONLY when no real BSR evidence exists; never replaces parsed data.
     """
     if reviews is None or reviews <= 0:
         return 250000  # unverified baseline: deliberately unattractive score
@@ -200,32 +200,33 @@ def calculate_kenp_economics(bsr: int, target_pages: int = 180) -> dict:
         "monthly_series_ecosystem": round(monthly_single_book * series_multiplier, 2),
     }
 
-def compute_comprehensive_score(books: list[dict], keyword: str = "") -> dict:
+def compute_comprehensive_score(books: list[dict], keyword: str = "", demand_verified: bool = False) -> dict:
     """
     100-point viability scoring with an evidence-confidence layer:
     unverified market data can never justify an 80+ alert.
+    All synthetic signals (index-based BSR, alternating indie flags) removed.
     """
     if not books or len(books) < 2:
         kenp_data = calculate_kenp_economics(220000)
         return {
             "total": 28, "demand": 10, "competition": 10, "series": 8,
             "avg_reviews": 0.0, "avg_bsr": 220000, "est_daily_sales": 1,
-            "kenp_metrics": kenp_data, "indie_count": 0, "vulnerable_count": 0,
+            "kenp_metrics": kenp_data, "verified_count": 0, "vulnerable_count": 0,
             "is_ghost_town": True, "saturation_warning": False, "confidence": "low",
         }
 
-    verified = [b["reviews"] for b in books if b.get("reviews") is not None]
+    verified_books = [b for b in books if b.get("reviews") is not None]
+    verified = [b["reviews"] for b in verified_books]
     confidence = "high" if len(verified) >= 3 else ("medium" if len(verified) >= 1 else "low")
 
     avg_reviews = (sum(verified) / len(verified)) if verified else 0.0
     vulnerable_count = sum(1 for r in verified if r < 100)
     heavy_incumbents = sum(1 for r in verified if r > 400)
 
-    bsrs = [b["bsr"] for b in books if b.get("bsr", 0) > 0]
-    avg_bsr = int(sum(bsrs) / len(bsrs)) if bsrs else 55000
+    bsrs = [b["bsr"] for b in verified_books if b.get("bsr", 0) > 0]
+    avg_bsr = int(sum(bsrs) / len(bsrs)) if bsrs else 250000  # evidence-free baseline
 
     kenp_data = calculate_kenp_economics(avg_bsr, target_pages=180)
-    indie_count = sum(1 for b in books if b.get("is_indie", False))
 
     # 1. Demand & Borrow Velocity (Max 35)
     if avg_bsr < 12000: demand_pts = 35
@@ -234,7 +235,7 @@ def compute_comprehensive_score(books: list[dict], keyword: str = "") -> dict:
     elif avg_bsr < 95000: demand_pts = 13
     else: demand_pts = 6
 
-    # 2. Competitor Vulnerability (Max 35) — bonuses require REAL evidence
+    # 2. Competitor Vulnerability (Max 35) — bonuses require REAL review evidence
     comp_pts = 5
     if confidence != "low":
         if avg_reviews < 60: comp_pts += 18
@@ -245,13 +246,13 @@ def compute_comprehensive_score(books: list[dict], keyword: str = "") -> dict:
         if heavy_incumbents >= 2: comp_pts = max(4, comp_pts - 12)
     comp_pts = min(comp_pts, 35)
 
-    # 3. Series Elasticity (Max 30)
+    # 3. Series Elasticity (Max 30) — built only from real signals
     series_pts = 10
-    if indie_count >= 3: series_pts += 10
-    elif indie_count >= 1: series_pts += 5
     action_tokens = ["protocol", "routine", "exercises", "reset", "system",
                      "workbook", "diet", "plan", "blueprint", "toolkit", "checklist", "sop"]
     if any(t in keyword.lower() for t in action_tokens):
+        series_pts += 10
+    if demand_verified:  # Amazon autocomplete confirmed live buyer traffic
         series_pts += 10
     series_pts = min(series_pts, 30)
 
@@ -264,12 +265,12 @@ def compute_comprehensive_score(books: list[dict], keyword: str = "") -> dict:
         "total": total_score, "demand": demand_pts, "competition": comp_pts, "series": series_pts,
         "avg_reviews": round(avg_reviews, 1), "avg_bsr": avg_bsr,
         "est_daily_sales": kenp_data["daily_borrows"], "kenp_metrics": kenp_data,
-        "indie_count": indie_count, "vulnerable_count": vulnerable_count,
+        "verified_count": len(verified), "vulnerable_count": vulnerable_count,
         "is_ghost_town": False, "saturation_warning": is_saturated, "confidence": confidence,
     }
 
 # ===========================================================================
-# RESILIENT SEARCH BRIDGE (multi-endpoint, block-aware, ZERO synthetic data)
+# RESILIENT SEARCH BRIDGES (block-aware, ZERO synthetic data)
 # ===========================================================================
 class ScraperBlockedException(Exception):
     """Raised only when EVERY search bridge rejects this egress IP."""
@@ -309,11 +310,51 @@ def _fetch_search_page(query: str) -> tuple[str, str]:
         raise ScraperBlockedException("All search bridges rejected this egress IP (403/429/anomaly).")
     return "", ""
 
+# --- Tier-2 evidence: genuine review counts + BSR from Amazon product pages ---
+READER_BRIDGE = "https://r.jina.ai/"
+READER_BUDGET_PER_CYCLE = 4   # hard cap on product-page fetches per sweep cycle
+_reader_used = 0
+
+def reset_reader_budget():
+    global _reader_used
+    _reader_used = 0
+
+def enrich_via_reader(books: list[dict], budget: int) -> list[dict]:
+    """
+    Fills evidence gaps by fetching real Amazon product pages through the
+    reader bridge. Only overwrites None values; never invents data.
+    """
+    global _reader_used
+    for b in books:
+        if _reader_used >= budget or b.get("reviews") is not None or not b.get("asin"):
+            continue
+        try:
+            r = requests.get(
+                READER_BRIDGE + f"https://www.amazon.com/dp/{b['asin']}",
+                headers={"User-Agent": random.choice(USER_AGENTS)},
+                timeout=25,
+            )
+            _reader_used += 1  # count attempts, not successes, to protect rpm
+            if r.status_code != 200:
+                continue
+            body = r.text
+            rev = re.search(r"([\d,]+)\s*(?:ratings|customer reviews|reviews)", body, re.I)
+            bsr = re.search(r"#([\d,]+)\s+in\s+", body)
+            if rev:
+                b["reviews"] = int(rev.group(1).replace(",", ""))
+                b["evidence"] = "reader"
+            if bsr:
+                b["bsr"] = min(300000, max(1000, int(bsr.group(1).replace(",", ""))))
+                b["evidence"] = "reader"
+        except Exception:
+            continue
+    return books
+
 def harvest_organic_books(keyword: str, max_items: int = 6) -> list[dict]:
     """
     Extracts organic Amazon listings via the search bridge.
-    STRICT RULE: reviews are parsed from real snippets or set to None.
-    Synthetic review/BSR fabrication is permanently removed.
+    Parses real review counts from snippets and real ASINs from result links.
+    STRICT RULE: unparsed reviews stay None; nothing is ever fabricated.
     """
     clean_kw = re.sub(r"[^\w\s]", "", keyword).strip()
     query = f"amazon kindle {clean_kw}"
@@ -324,19 +365,62 @@ def harvest_organic_books(keyword: str, max_items: int = 6) -> list[dict]:
         return books
 
     soup = BeautifulSoup(html, "lxml")
-    snippets = soup.find_all("a", class_="result__snippet") or soup.find_all("td", class_="result-snippet")
     rev_pattern = re.compile(r"(\d[\d,]*)\s*(?:global ratings|ratings|reviews|customer reviews)", re.I)
+    asin_pattern = re.compile(r"(/dp/|/gp/product/)([A-Z0-9]{10})")
 
-    for idx, s in enumerate(snippets[:max_items]):
-        text = s.get_text(separator=" ", strip=True)
-        rev_match = rev_pattern.search(text)
-        reviews = int(rev_match.group(1).replace(",", "")) if rev_match else None  # NEVER invent
-        books.append({
-            "title": text[:100].strip(),
-            "reviews": reviews,
-            "bsr": estimate_bsr_from_reviews(reviews),
-            "is_indie": idx % 2 == 0,
-        })
+    # Preferred: paired containers (correct link<->snippet alignment)
+    containers = soup.find_all("div", class_="result")
+    if containers:
+        for c in containers[:max_items]:
+            link_node = c.find("a", class_="result__a") or c.find("a", class_="result-link")
+            snip_node = c.find("a", class_="result__snippet") or c.find("td", class_="result-snippet")
+            if not snip_node:
+                continue
+            text = snip_node.get_text(separator=" ", strip=True)
+            asin = None
+            if link_node:
+                href = link_node.get("href", "")
+                m = asin_pattern.search(href)
+                if not m:
+                    um = re.search(r"uddg=([^&]+)", href)
+                    if um:
+                        m = asin_pattern.search(urllib.parse.unquote(um.group(1)))
+                if m:
+                    asin = m.group(2)
+            rev_match = rev_pattern.search(text)
+            reviews = int(rev_match.group(1).replace(",", "")) if rev_match else None
+            books.append({
+                "title": text[:100].strip(),
+                "reviews": reviews,
+                "bsr": estimate_bsr_from_reviews(reviews),
+                "asin": asin,
+                "evidence": "snippet" if reviews is not None else "none",
+            })
+    else:
+        # Fallback: index-paired lists (lite bridge layout)
+        link_nodes = soup.find_all("a", class_="result__a") or soup.find_all("a", class_="result-link")
+        snippet_nodes = soup.find_all("a", class_="result__snippet") or soup.find_all("td", class_="result-snippet")
+        for idx, s in enumerate(snippet_nodes[:max_items]):
+            text = s.get_text(separator=" ", strip=True)
+            asin = None
+            if idx < len(link_nodes):
+                href = link_nodes[idx].get("href", "")
+                m = asin_pattern.search(href)
+                if not m:
+                    um = re.search(r"uddg=([^&]+)", href)
+                    if um:
+                        m = asin_pattern.search(urllib.parse.unquote(um.group(1)))
+                if m:
+                    asin = m.group(2)
+            rev_match = rev_pattern.search(text)
+            reviews = int(rev_match.group(1).replace(",", "")) if rev_match else None
+            books.append({
+                "title": text[:100].strip(),
+                "reviews": reviews,
+                "bsr": estimate_bsr_from_reviews(reviews),
+                "asin": asin,
+                "evidence": "snippet" if reviews is not None else "none",
+            })
     return books
 
 # ===========================================================================
@@ -410,9 +494,11 @@ def generate_research_blueprint(keyword: str, existing_metrics: dict = None,
         comp_summary = cached_summary
     else:
         books = harvest_organic_books(keyword)
+        books = enrich_via_reader(books, 3)
         metrics = compute_comprehensive_score(books, keyword)
         comp_summary = "\n".join(
-            f"- {b['title']} | Reviews: {b['reviews'] if b['reviews'] is not None else 'Unverified'} | Est BSR: #{b['bsr']:,}"
+            f"- {b['title']} | Reviews: {b['reviews'] if b['reviews'] is not None else 'Unverified'} "
+            f"| Est BSR: #{b['bsr']:,} | Evidence: {b['evidence']}"
             for b in books
         ) if books else f"No organic listings retrievable for '{keyword}' at generation time."
 
@@ -519,6 +605,7 @@ def scan_niche_radar() -> dict:
     so the Telegram layer can NEVER conflate a block with a market verdict.
     """
     global LAST_RADAR
+    reset_reader_budget()
     alerts = []
     scanned = 0
     cold_scrapes = 0
@@ -542,9 +629,11 @@ def scan_niche_radar() -> dict:
                     break
                 time.sleep(random.uniform(*DDG_POLITE_DELAY))  # politeness on cold path only
                 books = harvest_organic_books(target_query, max_items=6)
-                metrics = compute_comprehensive_score(books, target_query)
+                books = enrich_via_reader(books, READER_BUDGET_PER_CYCLE)
+                metrics = compute_comprehensive_score(books, target_query, demand_verified=bool(verified_q))
                 comp_summary = "\n".join(
-                    f"- {b['title']} | Reviews: {b['reviews'] if b['reviews'] is not None else 'Unverified'} | Est BSR: #{b['bsr']:,}"
+                    f"- {b['title']} | Reviews: {b['reviews'] if b['reviews'] is not None else 'Unverified'} "
+                    f"| Est BSR: #{b['bsr']:,} | Evidence: {b['evidence']}"
                     for b in books
                 ) if books else ""
                 _cache_set(target_query, {"books": books, "metrics": metrics, "comp_summary": comp_summary})
