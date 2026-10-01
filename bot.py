@@ -68,10 +68,13 @@ def cache_alert(topic: str):
             json.dump(list(cache), f)
 
 def _evidence_line(result: dict) -> str:
-    line = (f"Evidence health: {result['verified_clusters']}/{result['scanned']} clusters with verified reviews | "
-            f"product-page fetches {result['reader_successes']}/{result['reader_attempts']} succeeded.")
+    line = (f"Evidence health: {result['verified_clusters']}/{result['scanned']} clusters verified | "
+            f"product-page fetches {result['reader_successes']}/{result['reader_attempts']} succeeded | "
+            f"saturated rejections: {result.get('saturated_count', 0)}.")
     if result.get("verified_clusters", 0) == 0:
         line += "\n⚠️ Evidence gap: no review counts retrievable this pass — scores capped at the evidence floor BY DESIGN. Run /selftest to probe each evidence tier live."
+    elif result.get("saturated_count", 0) > 0:
+        line += "\nℹ️ Saturated = real demand but review moats too deep. Those are correct rejections, not failures."
     return line
 
 # ---------------------------------------------------------------------------
@@ -203,6 +206,14 @@ async def radar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not acquired:
         lr = get_last_radar()
+        if lr.get("status") == "idle":
+            await status_msg.edit_text(
+                "⏳ The first sweep since boot is still running (the background job starts 30s after deploy).\n"
+                "It is cold-scanning up to 12 clusters with polite delays; results land within ~3 minutes.\n"
+                "Retry /radar shortly — or wait for the automatic alert if it hits ≥80/100.",
+                parse_mode="Markdown",
+            )
+            return
         status_clean = str(lr["status"]).replace("_", " ")
         topic_clean = str(lr["best_topic"]).replace("_", " ")
         await status_msg.edit_text(
@@ -335,6 +346,7 @@ async def radar_background_job(context: ContextTypes.DEFAULT_TYPE):
         result = await asyncio.to_thread(scan_niche_radar)
         print(f"[radar-job] status={result['status']} scanned={result['scanned']} "
               f"cold={result['cold_scrapes']} verified={result['verified_clusters']} "
+              f"saturated={result['saturated_count']} "
               f"reader={result['reader_successes']}/{result['reader_attempts']} "
               f"best={result['best_score']} ({result['best_topic']})")
 
