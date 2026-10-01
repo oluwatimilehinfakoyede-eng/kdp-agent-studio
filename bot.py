@@ -5,7 +5,7 @@ import json
 import asyncio
 import urllib.parse
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -140,6 +140,7 @@ async def handle_research_execution(query: str, chat_id: int, context: ContextTy
             f"  - Competition Barrier: {metrics['competition']}/35\n"
             f"  - Series Potential: {metrics['series']}/30\n"
             f"• *Evidence Confidence:* {metrics['confidence']}\n"
+            f"• *Evidence Mode:* {metrics.get('evidence_mode', 'unknown')}\n"
             f"• *Verified Review Evidence:* {metrics['verified_count']} listings\n"
             f"• *Est. Competitor Avg BSR:* #{metrics['avg_bsr']:,}\n"
             f"• *Est. Daily Borrows Velocity:* ~{metrics['est_daily_sales']} borrows/day\n"
@@ -252,7 +253,8 @@ async def radar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i, a in enumerate(alerts, 1):
             lines.append(
                 f"{i}. *{a['topic']}*\n"
-                f"   • *Score:* {a['score']}/100 | *Confidence:* {a['confidence']} | *Est. BSR:* #{a['avg_bsr']:,} (~{a['est_borrows']} borrows/day)\n"
+                f"   • *Score:* {a['score']}/100 | *Confidence:* {a['confidence']} | *Evidence:* {a.get('evidence_mode', 'none')}\n"
+                f"   • *Est. BSR:* #{a['avg_bsr']:,} (~{a['est_borrows']} borrows/day)\n"
                 f"   • *Reviews:* {a['avg_reviews']} | *Vulnerable Competitors:* {a['vulnerable_count']}\n"
                 f"   • *Est. Single Book Royalty:* ~${a['est_monthly_kenp']}/mo\n"
                 f"   • *Est. 3-Book Ecosystem:* ~${a['est_series_kenp']}/mo\n"
@@ -297,17 +299,23 @@ async def selftest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🧪 Running live evidence-tier self-test (this touches every bridge once)...")
     d = await asyncio.to_thread(run_selftest)
     proxy_lines = "\n".join(f"   - {k}: {v}" for k, v in d["proxy_results"].items()) or "   - (not reached)"
+    keyed = ", ".join(d["keyed_providers"]) if d["keyed_providers"] else "none configured (free tier only)"
+    sample_txt = ", ".join(str(s) for s in d["sample"]) if d["sample"] else "empty"
     text = (
         "🧪 *Evidence-Tier Self-Test*\n"
-        f"• Tier 0 Amazon autocomplete: {d['amazon']} suggestions\n"
-        f"• Tier 1 search bridge: {d['ddg_bridge']} | result pairs: {d['pairs']} | ASINs extracted: {d['asins']}\n"
-        f"• Tier 2 product-page proxies:\n{proxy_lines}\n"
-        + (f"• Error: {d['error']}" if d["error"] else "• Interpretation: any proxy line showing parse YES means real review counts can flow; all-no means we add a new proxy.")
+        f"• Tier 0 Amazon autocomplete: {d['amazon']} / {d['amazon2']} suggestions (two probes)\n"
+        f"• Tier 1 search bridge: {d['ddg_bridge']} | pairs {d['pairs']} | ASINs {d['asins']}\n"
+        f"• Tier 1.5 ratings-biased sample: [{sample_txt}]\n"
+        f"• Tier 2 providers (keyed: {keyed}):\n{proxy_lines}\n"
+        "• Interpretation: a Tier 1.5 sample with 2+ numbers OR any provider parse YES unlocks medium/high confidence and 80+ alerts."
     )
     try:
-        await msg.edit_text(text, parse_mode="Markdown")
+        await msg.edit_text(text, parse_mode="Markdown", link_preview_options=LinkPreviewOptions(is_disabled=True))
     except Exception:
-        await msg.edit_text(re.sub(r"[*_`]", "", text))
+        try:
+            await msg.edit_text(re.sub(r"[*_`]", "", text))
+        except Exception:
+            pass
 
 # ---------------------------------------------------------------------------
 # 24/7 AUTONOMOUS BACKGROUND HUNTER
@@ -338,7 +346,7 @@ async def radar_background_job(context: ContextTypes.DEFAULT_TYPE):
             alert_text = (
                 f"🚨 *24/7 Autonomous Radar Alert — Gold Nugget Detected!*\n\n"
                 f"• *Topic:* `{a['topic']}`\n"
-                f"• *Viability Score:* *{a['score']}/100* (confidence: {a['confidence']})\n"
+                f"• *Viability Score:* *{a['score']}/100* (confidence: {a['confidence']}, evidence: {a.get('evidence_mode', 'none')})\n"
                 f"• *Est. Borrows Velocity:* ~{a['est_borrows']} borrows/day\n"
                 f"• *Est. Competitor BSR:* #{a['avg_bsr']:,}\n"
                 f"• *Est. Single Book Royalty:* ~${a['est_monthly_kenp']}/mo\n"
