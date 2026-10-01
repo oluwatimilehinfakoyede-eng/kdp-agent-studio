@@ -1,7 +1,7 @@
-python-telegram-bot[job-queue]
-requests
-beautifulsoup4
-lxml
-python-dotenv
-groq
-APScheduler
+python-telegram-bot[job-queue]>=20.7
+requests>=2.31
+beautifulsoup4>=4.12
+lxml>=5.0
+python-dotenv>=1.0
+groq>=0.9
+APScheduler>=3.10,<4.0
