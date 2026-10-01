@@ -1,5 +1,7 @@
-python-telegram-bot
+python-telegram-bot[job-queue]
 requests
 beautifulsoup4
+lxml
 python-dotenv
 groq
+APScheduler
