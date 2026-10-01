@@ -17,6 +17,7 @@ from agents import (
     generate_research_blueprint,
     scan_niche_radar,
     run_diagnostics,
+    run_selftest,
     get_last_radar,
 )
 
@@ -26,7 +27,6 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 SUBSCRIBERS_FILE = "subscribers.json"
 ALERTS_CACHE_FILE = "alerts_cache.json"
 
-# Prevents /radar and the 30-min job from double-hitting the search bridges
 SWEEP_LOCK = asyncio.Lock()
 
 # ---------------------------------------------------------------------------
@@ -67,6 +67,13 @@ def cache_alert(topic: str):
         with open(ALERTS_CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(list(cache), f)
 
+def _evidence_line(result: dict) -> str:
+    line = (f"Evidence health: {result['verified_clusters']}/{result['scanned']} clusters with verified reviews | "
+            f"product-page fetches {result['reader_successes']}/{result['reader_attempts']} succeeded.")
+    if result.get("verified_clusters", 0) == 0:
+        line += "\n⚠️ Evidence gap: no review counts retrievable this pass — scores capped at the evidence floor BY DESIGN. Run /selftest to probe each evidence tier live."
+    return line
+
 # ---------------------------------------------------------------------------
 # COMMAND HANDLERS
 # ---------------------------------------------------------------------------
@@ -79,7 +86,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/scout <topic>` — Deconstruct & verify commercial 2-to-4 word search queries\n"
         "• `/research <query>` — Pull market data, score, & generate full asset package\n"
         "• `/radar` — Trigger an immediate sweep of verified evergreen non-fiction niches\n"
-        "• `/diag` — Bridge & IP health diagnostics\n\n"
+        "• `/diag` — Bridge & IP health diagnostics\n"
+        "• `/selftest` — Live-probe every evidence tier (autocomplete, bridges, ASIN pairing, reader proxies)\n\n"
         "📡 *24/7 Autonomous Radar:* LOCKED ON. Your chat is registered.\n"
         "The agent sweeps high-converting micro-clusters every *30 minutes* and pings you "
         "whenever a genuine *≥ 80/100* opportunity with verified evidence is detected."
@@ -115,10 +123,6 @@ async def scout(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_research_execution(query: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE,
                                     cached_metrics: dict = None, cached_summary: str = None):
-    """
-    Generates the asset package. When Radar-cached metrics AND summary are passed,
-    zero re-scraping occurs — the blueprint matches the score exactly (desync eliminated).
-    """
     status_msg = await context.bot.send_message(
         chat_id=chat_id,
         text=f"📊 Compiling Kindle metrics & generating asset package for:\n*{query}*...",
@@ -164,7 +168,6 @@ async def research(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await handle_research_execution(query, update.effective_chat.id, context)
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Inline callbacks. Radar buttons carry BOTH metrics and competitor summary."""
     query = update.callback_query
     await query.answer()
     prefix, index = query.data.split("_")
@@ -192,7 +195,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def radar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await update.message.reply_text("📡 Sweeping verified evergreen clusters (≥ 80/100 threshold)...", parse_mode="Markdown")
 
-    # Non-blocking acquire: never make the user wait on a running sweep
     try:
         acquired = await asyncio.wait_for(SWEEP_LOCK.acquire(), timeout=2.0)
     except asyncio.TimeoutError:
@@ -228,6 +230,7 @@ async def radar(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text(
                 "📡 *Partial sweep — request budget or time deadline reached (IP protection).*\n"
                 f"Clusters evaluated: {result['scanned']} | Best: *{result['best_score']}/100* (`{result['best_topic']}`)\n"
+                + _evidence_line(result) + "\n"
                 "Remaining clusters defer to the next cycle. No niches cleared 80/100 yet.",
                 parse_mode="Markdown",
             )
@@ -238,7 +241,8 @@ async def radar(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "📡 *Sweep complete — bridges healthy, no IP issues.*\n"
                 f"Clusters evaluated: {result['scanned']} (cold scrapes: {result['cold_scrapes']})\n"
                 f"Best score this pass: *{result['best_score']}/100* (`{result['best_topic']}`)\n"
-                "Nothing cleared the 80/100 threshold. This is a market verdict, not a scraper failure.",
+                + _evidence_line(result) + "\n"
+                "Nothing cleared the 80/100 threshold.",
                 parse_mode="Markdown",
             )
             return
@@ -271,7 +275,6 @@ async def diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     d = await asyncio.to_thread(run_diagnostics)
     verdict = "🚧 BLOCKED" if d["ddg_blocked"] else ("✅ HEALTHY" if d["ddg_snippets"] > 0 else "⚠️ EMPTY (silent block suspected)")
     lr = d["last_radar"]
-    # Legacy Markdown rejects lone underscores: sanitize every dynamic enum/slug
     status_clean = str(lr["status"]).replace("_", " ")
     topic_clean = str(lr["best_topic"]).replace("_", " ")
     text = (
@@ -279,15 +282,32 @@ async def diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Egress IP: `{d['egress_ip']}`\n"
         f"• Amazon autocomplete: {d['amazon_suggestions']} suggestions\n"
         f"• Search bridge reached: {d['ddg_bridge']}\n"
-        f"• Snippets parsed: {d['ddg_snippets']}\n"
+        f"• Result pairs parsed: {d['ddg_snippets']}\n"
         f"• Bridge verdict: {verdict}\n"
         f"• Last radar: status {status_clean} | scanned {lr['scanned']} | best {lr['best_score']}/100 ({topic_clean})\n"
+        f"• Evidence: {lr['verified_clusters']} verified clusters | reader {lr['reader_successes']}/{lr['reader_attempts']}\n"
         + (f"• Error: {d['error']}" if d["error"] else "")
     )
     try:
         await msg.edit_text(text, parse_mode="Markdown")
     except Exception:
-        await msg.edit_text(re.sub(r"[*_`]", "", text))  # plain-text fallback, never freeze again
+        await msg.edit_text(re.sub(r"[*_`]", "", text))
+
+async def selftest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = await update.message.reply_text("🧪 Running live evidence-tier self-test (this touches every bridge once)...")
+    d = await asyncio.to_thread(run_selftest)
+    proxy_lines = "\n".join(f"   - {k}: {v}" for k, v in d["proxy_results"].items()) or "   - (not reached)"
+    text = (
+        "🧪 *Evidence-Tier Self-Test*\n"
+        f"• Tier 0 Amazon autocomplete: {d['amazon']} suggestions\n"
+        f"• Tier 1 search bridge: {d['ddg_bridge']} | result pairs: {d['pairs']} | ASINs extracted: {d['asins']}\n"
+        f"• Tier 2 product-page proxies:\n{proxy_lines}\n"
+        + (f"• Error: {d['error']}" if d["error"] else "• Interpretation: any proxy line showing parse YES means real review counts can flow; all-no means we add a new proxy.")
+    )
+    try:
+        await msg.edit_text(text, parse_mode="Markdown")
+    except Exception:
+        await msg.edit_text(re.sub(r"[*_`]", "", text))
 
 # ---------------------------------------------------------------------------
 # 24/7 AUTONOMOUS BACKGROUND HUNTER
@@ -297,7 +317,6 @@ async def radar_background_job(context: ContextTypes.DEFAULT_TYPE):
     if not subscribers:
         return
 
-    # Non-blocking: if a manual sweep owns the lock, skip this cycle entirely
     try:
         acquired = await asyncio.wait_for(SWEEP_LOCK.acquire(), timeout=1.0)
     except asyncio.TimeoutError:
@@ -307,7 +326,9 @@ async def radar_background_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         result = await asyncio.to_thread(scan_niche_radar)
         print(f"[radar-job] status={result['status']} scanned={result['scanned']} "
-              f"cold={result['cold_scrapes']} best={result['best_score']} ({result['best_topic']})")
+              f"cold={result['cold_scrapes']} verified={result['verified_clusters']} "
+              f"reader={result['reader_successes']}/{result['reader_attempts']} "
+              f"best={result['best_score']} ({result['best_topic']})")
 
         for a in result["alerts"]:
             topic_key = a["topic"].strip().lower()
@@ -350,6 +371,7 @@ def main():
     app.add_handler(CommandHandler("research", research))
     app.add_handler(CommandHandler("radar", radar))
     app.add_handler(CommandHandler("diag", diag))
+    app.add_handler(CommandHandler("selftest", selftest))
     app.add_handler(CallbackQueryHandler(button_callback))
 
     if app.job_queue:
