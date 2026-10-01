@@ -5,6 +5,7 @@ import time
 import random
 import urllib.parse
 import requests
+from concurrent.futures import ThreadPoolExecutor
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from groq import Groq
@@ -111,6 +112,7 @@ def probe_amazon_suggestions(prefix: str) -> list[str]:
     return []
 
 def scout_seed_angles(broad_topic: str) -> list[dict]:
+    """Extracts authentic 2-to-4 word buyer queries; verifies them concurrently."""
     suggestions = probe_amazon_suggestions(broad_topic)
     candidates = []
 
@@ -140,10 +142,12 @@ Return ONLY a JSON array of strings: ["query 1", "query 2"]
             except Exception:
                 pass
 
-    results = []
-    for q in candidates[:6]:
-        direct_check = probe_amazon_suggestions(q)
-        results.append({"query": q, "verified": len(direct_check) > 0, "suggestions": direct_check[:3]})
+    def _verify(q: str) -> dict:
+        sugg = probe_amazon_suggestions(q)
+        return {"query": q, "verified": len(sugg) > 0, "suggestions": sugg[:3]}
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        results = list(pool.map(_verify, candidates[:6]))
     return results
 
 # ===========================================================================
@@ -386,8 +390,15 @@ _reader_used = 0
 _reader_success = 0
 
 def reader_budget() -> int:
-    """ScraperAPI free tier is 5k/month: cap attempts at 3/cycle when it is the primary provider."""
-    return 3 if os.getenv("SCRAPERAPI_KEY") else 4
+    """Provider-aware fetch budget per cycle (keeps every free tier inside limits)."""
+    if os.getenv("SCRAPERAPI_KEY"):
+        return 3
+    if os.getenv("JINA_API_KEY"):
+        return 6
+    return 4
+
+def _has_keyed_provider() -> bool:
+    return bool(os.getenv("SCRAPERAPI_KEY") or os.getenv("JINA_API_KEY"))
 
 def reset_reader_budget():
     global _reader_used, _reader_success
@@ -405,10 +416,17 @@ def fetch_product_page(asin: str) -> tuple[str, str]:
             continue
     return "", ""
 
-def enrich_via_reader(books: list[dict], budget: int) -> list[dict]:
+def enrich_via_reader(books: list[dict], budget: int, target_verified: int = 2) -> list[dict]:
+    """
+    Tier-2 evidence with a per-cluster quorum: stop at `target_verified` verified
+    listings so the global budget spreads across as many clusters as possible.
+    """
     global _reader_used, _reader_success
+    local_verified = sum(1 for b in books if b.get("reviews") is not None)
     for b in books:
-        if _reader_used >= budget or b.get("reviews") is not None or not b.get("asin"):
+        if _reader_used >= budget or local_verified >= target_verified:
+            break
+        if b.get("reviews") is not None or not b.get("asin"):
             continue
         _reader_used += 1
         body, proxy = fetch_product_page(b["asin"])
@@ -427,19 +445,19 @@ def enrich_via_reader(books: list[dict], budget: int) -> list[dict]:
                 b["evidence"] = f"reader:{proxy}"
                 break
         if b.get("reviews") is not None:
+            local_verified += 1
             _reader_success += 1
     return books
 
 # ===========================================================================
-# TIER 1.5: CLUSTER-LEVEL REVIEW SAMPLING (keyless unlock)
+# TIER 1.5: CLUSTER-LEVEL REVIEW SAMPLING (keyless fallback only)
 # ===========================================================================
 SAMPLE_QUERY_PATTERN = re.compile(r"([\d,]+)\s*(?:global\s+)?(?:ratings|customer\s+reviews|reviews)", re.I)
 
 def probe_cluster_review_sample(keyword: str) -> list[int]:
     """
-    One ratings-biased bridge query per cold cluster. Returns REAL review counts
-    observed in result snippets, used ONLY as a cluster-level competition sample
-    (never attributed to individual titles).
+    One ratings-biased bridge query; returns REAL review counts observed in result
+    snippets, used ONLY as a cluster-level competition sample (never per-title).
     """
     clean = re.sub(r"[^\w\s]", "", keyword).strip()
     query = f'amazon {clean} "out of 5 stars" ratings'
@@ -485,18 +503,20 @@ def harvest_organic_books(keyword: str, max_items: int = 6) -> list[dict]:
     return books
 
 # ===========================================================================
-# BUDGET, SCHEMA-VERSIONED CACHE, TELEMETRY
+# BUDGET, SCHEMA-VERSIONED CACHE (EVIDENCE-AWARE TTL), TELEMETRY
 # ===========================================================================
 RADAR_CACHE_FILE = "radar_cache.json"
 CACHE_TTL_SECONDS = 6 * 3600
-CACHE_SCHEMA = 3                    # invalidates all pre-Tier-1.5 poisoned entries instantly
+CACHE_TTL_EVIDENCE_GAP_SECONDS = 45 * 60   # evidence-poor verdicts retry next cycles, not in 6h
+SCOUT_CACHE_TTL_SECONDS = 24 * 3600        # query angles are stable for a day
+CACHE_SCHEMA = 3
 DDG_POLITE_DELAY = (2.5, 5.0)
 MAX_COLD_SCRAPES_PER_CYCLE = 12
 CYCLE_DEADLINE_SECONDS = 180
 
 LAST_RADAR = {"status": "idle", "scanned": 0, "cold_scrapes": 0, "best_score": 0,
               "best_topic": "", "detail": "", "verified_clusters": 0,
-              "reader_attempts": 0, "reader_successes": 0, "ts": 0.0}
+              "saturated_count": 0, "reader_attempts": 0, "reader_successes": 0, "ts": 0.0}
 
 def _cache_load() -> dict:
     if os.path.exists(RADAR_CACHE_FILE):
@@ -508,11 +528,14 @@ def _cache_load() -> dict:
     return {}
 
 def _cache_get(key: str):
+    """Confidence-aware TTL: evidence gaps expire in 45 min; verified verdicts persist 6 h."""
     entry = _cache_load().get(key)
-    if (entry and entry.get("schema") == CACHE_SCHEMA
-            and (time.time() - entry.get("ts", 0)) < CACHE_TTL_SECONDS):
-        return entry
-    return None
+    if not entry or entry.get("schema") != CACHE_SCHEMA:
+        return None
+    age = time.time() - entry.get("ts", 0)
+    confidence = (entry.get("metrics") or {}).get("confidence", "low")
+    ttl = CACHE_TTL_SECONDS if confidence != "low" else CACHE_TTL_EVIDENCE_GAP_SECONDS
+    return entry if age < ttl else None
 
 def _cache_set(key: str, payload: dict):
     cache = _cache_load()
@@ -522,6 +545,16 @@ def _cache_set(key: str, payload: dict):
             cache.pop(k, None)
     with open(RADAR_CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(cache, f)
+
+def _scout_cache_get(cluster: str):
+    entry = _cache_load().get(f"scout::{cluster}")
+    if (entry and entry.get("schema") == CACHE_SCHEMA
+            and (time.time() - entry.get("ts", 0)) < SCOUT_CACHE_TTL_SECONDS):
+        return entry.get("queries")
+    return None
+
+def _scout_cache_set(cluster: str, queries: list):
+    _cache_set(f"scout::{cluster}", {"queries": queries})
 
 def get_last_radar() -> dict:
     return dict(LAST_RADAR)
@@ -692,7 +725,7 @@ GOLDEN_SEED_CLUSTERS = [
 ]
 
 # ===========================================================================
-# 24/7 RADAR SWEEP
+# 24/7 RADAR SWEEP (cached, budgeted, deadline-bounded, status-explicit)
 # ===========================================================================
 def scan_niche_radar() -> dict:
     global LAST_RADAR
@@ -702,6 +735,7 @@ def scan_niche_radar() -> dict:
     scanned = 0
     cold_scrapes = 0
     verified_clusters = 0
+    saturated_count = 0
     best_score, best_topic = 0, ""
     status, detail = "no_matches", ""
 
@@ -723,15 +757,21 @@ def scan_niche_radar() -> dict:
                     status = "budget_deferred"
                     detail = f"Cold-scrape budget ({MAX_COLD_SCRAPES_PER_CYCLE}) reached; remaining clusters deferred to next cycle."
                     break
-                queries = scout_seed_angles(cluster)
+                cached_queries = _scout_cache_get(cluster)
+                if cached_queries is not None:
+                    queries = cached_queries
+                else:
+                    queries = scout_seed_angles(cluster)
+                    _scout_cache_set(cluster, queries)
                 verified_q = [q["query"] for q in queries if q["verified"]]
                 target_query = verified_q[0] if verified_q else (queries[0]["query"] if queries else cluster)
                 time.sleep(random.uniform(*DDG_POLITE_DELAY))
                 books = harvest_organic_books(target_query, max_items=6)
-                books = enrich_via_reader(books, reader_budget())
+                books = enrich_via_reader(books, reader_budget(), target_verified=2)
                 demand_verified = bool(verified_q)
                 metrics = compute_comprehensive_score(books, target_query, demand_verified=demand_verified)
-                if metrics.get("confidence") == "low":
+                # Tier 1.5 only earns its extra bridge query when no keyed provider exists
+                if metrics.get("confidence") == "low" and not _has_keyed_provider():
                     sample = probe_cluster_review_sample(target_query)
                     if sample:
                         metrics = compute_comprehensive_score(
@@ -756,6 +796,8 @@ def scan_niche_radar() -> dict:
             scanned += 1
             if metrics.get("confidence") != "low":
                 verified_clusters += 1
+            if metrics.get("saturation_warning"):
+                saturated_count += 1
             if metrics["total"] > best_score:
                 best_score, best_topic = metrics["total"], target_query
 
@@ -796,7 +838,7 @@ def scan_niche_radar() -> dict:
 
     LAST_RADAR = {"status": status, "scanned": scanned, "cold_scrapes": cold_scrapes,
                   "best_score": best_score, "best_topic": best_topic, "detail": detail,
-                  "verified_clusters": verified_clusters,
+                  "verified_clusters": verified_clusters, "saturated_count": saturated_count,
                   "reader_attempts": _reader_used, "reader_successes": _reader_success,
                   "ts": time.time()}
     return {"alerts": alerts, **LAST_RADAR}
