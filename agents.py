@@ -12,7 +12,7 @@ from groq import Groq
 load_dotenv()
 
 # ===========================================================================
-# LLM ORCHESTRATION (Groq LPU pool with failover + reasoning-tag stripping)
+# LLM ORCHESTRATION (Groq LPU pool, fail-fast, bounded worst case)
 # ===========================================================================
 GROQ_MODELS = [
     "openai/gpt-oss-120b",
@@ -23,13 +23,13 @@ GROQ_MODELS = [
 _groq_client = None
 
 def get_groq_client() -> Groq:
-    """Lazy initialization: prevents import-time crash if env var is missing."""
+    """Lazy initialization with hard timeouts so a dead endpoint cannot stall a sweep."""
     global _groq_client
     if _groq_client is None:
         api_key = os.getenv("GROQ_API_KEY")
         if not api_key:
             raise RuntimeError("GROQ_API_KEY is missing from environment variables.")
-        _groq_client = Groq(api_key=api_key)
+        _groq_client = Groq(api_key=api_key, timeout=30.0, max_retries=0)
     return _groq_client
 
 USER_AGENTS = [
@@ -39,31 +39,31 @@ USER_AGENTS = [
 ]
 
 def call_llm(prompt: str, system_prompt: str = "", temperature: float = 0.2) -> str:
-    """Direct Groq LPU caller with model failover, 429 backoff, and think-tag stripping."""
+    """
+    Groq LPU caller with model failover and reasoning-tag stripping.
+    Bounded worst case: 3 models x 30s timeout + one short 429 pause (~100s max).
+    """
     client = get_groq_client()
     full_content = f"{system_prompt.strip()}\n\n{prompt.strip()}".strip() if system_prompt else prompt.strip()
     messages = [{"role": "user", "content": full_content}]
 
     last_error = None
     for model_id in GROQ_MODELS:
-        for attempt in range(2):
-            try:
-                completion = client.chat.completions.create(
-                    messages=messages,
-                    model=model_id,
-                    temperature=temperature,
-                )
-                if completion.choices and completion.choices[0].message.content:
-                    raw_text = completion.choices[0].message.content
-                    cleaned = re.sub(r"<(thought|think)>.*?</\1>", "", raw_text, flags=re.DOTALL).strip()
-                    return cleaned if cleaned else raw_text
-            except Exception as e:
-                last_error = e
-                err_str = str(e)
-                if "429" in err_str or "rate_limit_exceeded" in err_str:
-                    time.sleep((attempt + 1) * 2.5 + random.uniform(0.5, 1.5))
-                    continue
-                break
+        try:
+            completion = client.chat.completions.create(
+                messages=messages,
+                model=model_id,
+                temperature=temperature,
+            )
+            if completion.choices and completion.choices[0].message.content:
+                raw_text = completion.choices[0].message.content
+                cleaned = re.sub(r"<(thought|think)>.*?</\1>", "", raw_text, flags=re.DOTALL).strip()
+                return cleaned if cleaned else raw_text
+        except Exception as e:
+            last_error = e
+            if "429" in str(e) or "rate_limit_exceeded" in str(e):
+                time.sleep(2.0 + random.uniform(0.3, 1.0))
+            continue  # fail fast to the next model
     raise RuntimeError(f"All Groq endpoints temporarily unavailable: {last_error}")
 
 # ===========================================================================
@@ -368,6 +368,14 @@ def harvest_organic_books(keyword: str, max_items: int = 6) -> list[dict]:
     rev_pattern = re.compile(r"(\d[\d,]*)\s*(?:global ratings|ratings|reviews|customer reviews)", re.I)
     asin_pattern = re.compile(r"(/dp/|/gp/product/)([A-Z0-9]{10})")
 
+    def _extract_asin(href: str):
+        m = asin_pattern.search(href)
+        if not m:
+            um = re.search(r"uddg=([^&]+)", href)
+            if um:
+                m = asin_pattern.search(urllib.parse.unquote(um.group(1)))
+        return m.group(2) if m else None
+
     # Preferred: paired containers (correct link<->snippet alignment)
     containers = soup.find_all("div", class_="result")
     if containers:
@@ -377,16 +385,7 @@ def harvest_organic_books(keyword: str, max_items: int = 6) -> list[dict]:
             if not snip_node:
                 continue
             text = snip_node.get_text(separator=" ", strip=True)
-            asin = None
-            if link_node:
-                href = link_node.get("href", "")
-                m = asin_pattern.search(href)
-                if not m:
-                    um = re.search(r"uddg=([^&]+)", href)
-                    if um:
-                        m = asin_pattern.search(urllib.parse.unquote(um.group(1)))
-                if m:
-                    asin = m.group(2)
+            asin = _extract_asin(link_node.get("href", "")) if link_node else None
             rev_match = rev_pattern.search(text)
             reviews = int(rev_match.group(1).replace(",", "")) if rev_match else None
             books.append({
@@ -402,16 +401,7 @@ def harvest_organic_books(keyword: str, max_items: int = 6) -> list[dict]:
         snippet_nodes = soup.find_all("a", class_="result__snippet") or soup.find_all("td", class_="result-snippet")
         for idx, s in enumerate(snippet_nodes[:max_items]):
             text = s.get_text(separator=" ", strip=True)
-            asin = None
-            if idx < len(link_nodes):
-                href = link_nodes[idx].get("href", "")
-                m = asin_pattern.search(href)
-                if not m:
-                    um = re.search(r"uddg=([^&]+)", href)
-                    if um:
-                        m = asin_pattern.search(urllib.parse.unquote(um.group(1)))
-                if m:
-                    asin = m.group(2)
+            asin = _extract_asin(link_nodes[idx].get("href", "")) if idx < len(link_nodes) else None
             rev_match = rev_pattern.search(text)
             reviews = int(rev_match.group(1).replace(",", "")) if rev_match else None
             books.append({
@@ -424,12 +414,13 @@ def harvest_organic_books(keyword: str, max_items: int = 6) -> list[dict]:
     return books
 
 # ===========================================================================
-# IP-REPUTATION BUDGET: TTL CACHE + POLITE DELAYS + TELEMETRY
+# IP-REPUTATION BUDGET: TTL CACHE + POLITE DELAYS + DEADLINE + TELEMETRY
 # ===========================================================================
 RADAR_CACHE_FILE = "radar_cache.json"
 CACHE_TTL_SECONDS = 6 * 3600          # re-validate a cluster at most every 6 hours
 DDG_POLITE_DELAY = (2.5, 5.0)         # jittered seconds between COLD scrapes only
 MAX_COLD_SCRAPES_PER_CYCLE = 12       # hard cap on fresh DDG hits per 30-min cycle
+CYCLE_DEADLINE_SECONDS = 180          # hard wall-clock cap per sweep; keeps lock window tiny
 
 LAST_RADAR = {"status": "idle", "scanned": 0, "cold_scrapes": 0,
               "best_score": 0, "best_topic": "", "detail": "", "ts": 0.0}
@@ -457,6 +448,10 @@ def _cache_set(key: str, payload: dict):
             cache.pop(k, None)
     with open(RADAR_CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(cache, f)
+
+def get_last_radar() -> dict:
+    """Safe copy of the most recent completed sweep telemetry."""
+    return dict(LAST_RADAR)
 
 def run_diagnostics() -> dict:
     """Powers /diag: separates 'IP blocked' from 'healthy but empty market'."""
@@ -596,16 +591,19 @@ GOLDEN_SEED_CLUSTERS = [
 ]
 
 # ===========================================================================
-# 24/7 RADAR SWEEP (budgeted, cached, circuit-broken, status-explicit)
+# 24/7 RADAR SWEEP (cached, budgeted, deadline-bounded, status-explicit)
 # ===========================================================================
 def scan_niche_radar() -> dict:
     """
-    Returns a status object:
-      status in {"success", "no_matches", "ip_blocked", "budget_deferred"}
-    so the Telegram layer can NEVER conflate a block with a market verdict.
+    Sweeps evergreen micro-clusters with three protections:
+      1. Cluster-keyed TTL cache: warm cycles perform ZERO network calls.
+      2. Cold-scrape budget + cycle deadline: the sweep can never run away.
+      3. Explicit status object so Telegram never conflates block vs verdict.
+    Returns: {"alerts", "status", "scanned", "cold_scrapes", "best_score", "best_topic", "detail", "ts"}
     """
     global LAST_RADAR
     reset_reader_budget()
+    cycle_start = time.time()
     alerts = []
     scanned = 0
     cold_scrapes = 0
@@ -613,30 +611,45 @@ def scan_niche_radar() -> dict:
     status, detail = "no_matches", ""
 
     for cluster in random.sample(GOLDEN_SEED_CLUSTERS, len(GOLDEN_SEED_CLUSTERS)):
+        if time.time() - cycle_start > CYCLE_DEADLINE_SECONDS:
+            status = "budget_deferred"
+            detail = f"Cycle deadline ({CYCLE_DEADLINE_SECONDS}s) reached; remaining clusters deferred to next cycle."
+            break
         try:
-            queries = scout_seed_angles(cluster)
-            verified_q = [q["query"] for q in queries if q["verified"]]
-            target_query = verified_q[0] if verified_q else (queries[0]["query"] if queries else cluster)
-
-            cached = _cache_get(target_query)
-            if cached:
-                books, metrics = cached["books"], cached["metrics"]
+            cached = _cache_get(cluster)
+            if cached and cached.get("target_query"):
+                # WARM PATH: zero network calls, lock window stays milliseconds
+                target_query = cached["target_query"]
+                books = cached["books"]
+                metrics = cached["metrics"]
                 comp_summary = cached["comp_summary"]
+                demand_verified = cached.get("demand_verified", False)
             else:
+                # COLD PATH: budgeted and deadline-bounded
                 if cold_scrapes >= MAX_COLD_SCRAPES_PER_CYCLE:
                     status = "budget_deferred"
                     detail = f"Cold-scrape budget ({MAX_COLD_SCRAPES_PER_CYCLE}) reached; remaining clusters deferred to next cycle."
                     break
-                time.sleep(random.uniform(*DDG_POLITE_DELAY))  # politeness on cold path only
+                queries = scout_seed_angles(cluster)
+                verified_q = [q["query"] for q in queries if q["verified"]]
+                target_query = verified_q[0] if verified_q else (queries[0]["query"] if queries else cluster)
+                time.sleep(random.uniform(*DDG_POLITE_DELAY))
                 books = harvest_organic_books(target_query, max_items=6)
                 books = enrich_via_reader(books, READER_BUDGET_PER_CYCLE)
-                metrics = compute_comprehensive_score(books, target_query, demand_verified=bool(verified_q))
+                demand_verified = bool(verified_q)
+                metrics = compute_comprehensive_score(books, target_query, demand_verified=demand_verified)
                 comp_summary = "\n".join(
                     f"- {b['title']} | Reviews: {b['reviews'] if b['reviews'] is not None else 'Unverified'} "
                     f"| Est BSR: #{b['bsr']:,} | Evidence: {b['evidence']}"
                     for b in books
                 ) if books else ""
-                _cache_set(target_query, {"books": books, "metrics": metrics, "comp_summary": comp_summary})
+                _cache_set(cluster, {
+                    "target_query": target_query,
+                    "books": books,
+                    "metrics": metrics,
+                    "comp_summary": comp_summary,
+                    "demand_verified": demand_verified,
+                })
                 cold_scrapes += 1
 
             scanned += 1
