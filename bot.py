@@ -135,9 +135,9 @@ async def handle_research_execution(query: str, chat_id: int, context: ContextTy
             f"  - Competition Barrier: {metrics['competition']}/35\n"
             f"  - Series Potential: {metrics['series']}/30\n"
             f"• *Evidence Confidence:* {metrics['confidence']}\n"
+            f"• *Verified Review Evidence:* {metrics['verified_count']} listings\n"
             f"• *Est. Competitor Avg BSR:* #{metrics['avg_bsr']:,}\n"
             f"• *Est. Daily Borrows Velocity:* ~{metrics['est_daily_sales']} borrows/day\n"
-            f"• *Top-Ranked Indie Books:* {metrics['indie_count']}\n"
             f"• *Avg Reviews:* {metrics['avg_reviews']}\n\n"
             f"📁 *Complete Production Package Attached Below:*"
         )
@@ -254,17 +254,23 @@ async def diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     d = await asyncio.to_thread(run_diagnostics)
     verdict = "🚧 BLOCKED" if d["ddg_blocked"] else ("✅ HEALTHY" if d["ddg_snippets"] > 0 else "⚠️ EMPTY (silent block suspected)")
     lr = d["last_radar"]
-    await msg.edit_text(
+    # Legacy Markdown rejects lone underscores: sanitize every dynamic enum/slug
+    status_clean = str(lr["status"]).replace("_", " ")
+    topic_clean = str(lr["best_topic"]).replace("_", " ")
+    text = (
         "🩺 *Bridge Diagnostics*\n"
-        f"• Egress IP (the address being judged): `{d['egress_ip']}`\n"
+        f"• Egress IP: `{d['egress_ip']}`\n"
         f"• Amazon autocomplete: {d['amazon_suggestions']} suggestions\n"
         f"• Search bridge reached: {d['ddg_bridge']}\n"
         f"• Snippets parsed: {d['ddg_snippets']}\n"
         f"• Bridge verdict: {verdict}\n"
-        f"• Last radar: status={lr['status']} | scanned={lr['scanned']} | best={lr['best_score']}/100 ({lr['best_topic']})\n"
-        + (f"• Error: {d['error']}" if d["error"] else ""),
-        parse_mode="Markdown",
+        f"• Last radar: status {status_clean} | scanned {lr['scanned']} | best {lr['best_score']}/100 ({topic_clean})\n"
+        + (f"• Error: {d['error']}" if d["error"] else "")
     )
+    try:
+        await msg.edit_text(text, parse_mode="Markdown")
+    except Exception:
+        await msg.edit_text(re.sub(r"[*_`]", "", text))  # plain-text fallback, never freeze again
 
 # ---------------------------------------------------------------------------
 # 24/7 AUTONOMOUS BACKGROUND HUNTER
