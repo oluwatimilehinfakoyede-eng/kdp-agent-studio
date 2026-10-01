@@ -72,7 +72,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Registers chat and outputs the command interface."""
     chat_id = update.effective_chat.id
     save_subscriber(chat_id)
-    
+
     welcome_msg = (
         "🚀 *KDP Agent Studio Pro — High-Yield Discovery Engine Active*\n\n"
         "*Available Commands:*\n"
@@ -80,7 +80,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/research <query>` — Pull market data, score, & generate full asset package\n"
         "• `/radar` — Trigger an immediate sweep of evergreen non-fiction niches\n\n"
         "📡 *24/7 Autonomous Radar:* LOCKED ON. Your chat is registered.\n"
-        "The agent sweeps high-converting non-fiction clusters every *30 minutes* and pings you whenever an *≥ 80/100* opportunity is detected."
+        "The agent sweeps high-converting micro-clusters every *30 minutes* and pings you whenever a genuine *≥ 80/100* opportunity is detected."
     )
     await update.message.reply_text(welcome_msg, parse_mode="Markdown")
 
@@ -106,8 +106,6 @@ async def scout(update: Update, context: ContextTypes.DEFAULT_TYPE):
             suggestions_text = f"Suggestions: {', '.join(res['suggestions'])}" if res["suggestions"] else "Suggestions: None"
 
             reply_lines.append(f"{i}. *{query}*\n   {status_emoji} — _{suggestions_text}_")
-            
-            # Action row: Research button + Direct Amazon search link
             amz_url = f"https://www.amazon.com/s?k={urllib.parse.quote_plus(query)}&i=digital-text"
             keyboard.append([
                 InlineKeyboardButton(f"📊 Blueprint #{i}", callback_data=f"res_{i}"),
@@ -140,7 +138,7 @@ async def handle_research_execution(query: str, chat_id: int, context: ContextTy
             f"• *Est. Competitor Avg BSR:* #{metrics['avg_bsr']:,}\n"
             f"• *Est. Daily Borrows Velocity:* ~{metrics['est_daily_sales']} borrows/day\n"
             f"• *Top-Ranked Indie Books:* {metrics['indie_count']}\n"
-            f"• *Avg Reviews (Top 8):* {metrics['avg_reviews']}\n\n"
+            f"• *Avg Reviews (Top 7):* {metrics['avg_reviews']}\n\n"
             f"📁 *Complete Production Package Attached Below:*"
         )
         await status_msg.edit_text(summary_card, parse_mode="Markdown")
@@ -189,7 +187,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def radar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """On-demand radar execution."""
-    status_msg = await update.message.reply_text("📡 *Sweeping evergreen Kindle Unlimited clusters (≥ 80/100 threshold)...*", parse_mode="Markdown")
+    status_msg = await update.message.reply_text("📡 *Sweeping verified micro-niche clusters (≥ 80/100 threshold)...*", parse_mode="Markdown")
     try:
         alerts = await asyncio.to_thread(scan_niche_radar)
         if not alerts:
@@ -218,10 +216,7 @@ async def radar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def radar_background_job(context: ContextTypes.DEFAULT_TYPE):
-    """
-    24/7 Autonomous Background Hunter:
-    Sweeps clusters every 30 minutes, validates intent, and dispatches new opportunities.
-    """
+    """24/7 Autonomous Background Hunter."""
     subscribers = load_subscribers()
     if not subscribers:
         return
