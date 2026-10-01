@@ -62,7 +62,7 @@ def call_llm(prompt: str, system_prompt: str = "", temperature: float = 0.2) -> 
     raise RuntimeError(f"All Groq endpoints temporarily unavailable: {last_error}")
 
 # ===========================================================================
-# DEMOGRAPHIC AWARENESS
+# DEMOGRAPHIC AWARENESS (prevents generic filler in blueprints)
 # ===========================================================================
 DEMOGRAPHIC_MAP = {
     "diet": "Chronic-illness patient / medical-diet adherent. Needs low-energy meal prep, physical grocery lists, clinical safety notes.",
@@ -183,25 +183,49 @@ def calculate_kenp_economics(bsr: int, target_pages: int = 180) -> dict:
         "monthly_series_ecosystem": round(monthly_single_book * series_multiplier, 2),
     }
 
-def compute_comprehensive_score(books: list[dict], keyword: str = "", demand_verified: bool = False) -> dict:
+def compute_comprehensive_score(books: list[dict], keyword: str = "", demand_verified: bool = False,
+                                review_sample: list[int] = None) -> dict:
+    """
+    100-point viability scoring with a three-tier evidence model:
+      per-book        : review counts parsed from individual listings (strongest)
+      cluster-sample  : review counts parsed from ratings-biased snippets (sample-level)
+      none            : no review evidence -> scores capped at the evidence floor
+    No synthetic numbers are ever introduced.
+    """
     if not books or len(books) < 2:
         kenp_data = calculate_kenp_economics(220000)
         return {
             "total": 28, "demand": 10, "competition": 10, "series": 8,
             "avg_reviews": 0.0, "avg_bsr": 220000, "est_daily_sales": 1,
             "kenp_metrics": kenp_data, "verified_count": 0, "vulnerable_count": 0,
-            "is_ghost_town": True, "saturation_warning": False, "confidence": "low",
+            "is_ghost_town": True, "saturation_warning": False,
+            "confidence": "low", "evidence_mode": "none",
         }
 
     verified_books = [b for b in books if b.get("reviews") is not None]
-    verified = [b["reviews"] for b in verified_books]
-    confidence = "high" if len(verified) >= 3 else ("medium" if len(verified) >= 1 else "low")
+    per_book = [b["reviews"] for b in verified_books]
+    sample = [r for r in (review_sample or []) if isinstance(r, int) and r > 0]
 
-    avg_reviews = (sum(verified) / len(verified)) if verified else 0.0
-    vulnerable_count = sum(1 for r in verified if r < 100)
-    heavy_incumbents = sum(1 for r in verified if r > 400)
+    if per_book:
+        evidence_mode = "per-book"
+        working = per_book
+        bsrs = [b["bsr"] for b in verified_books if b.get("bsr", 0) > 0]
+    elif len(sample) >= 2:
+        evidence_mode = "cluster-sample"
+        working = sample
+        bsrs = [estimate_bsr_from_reviews(r) for r in sample]
+    else:
+        evidence_mode = "none"
+        working = []
+        bsrs = []
 
-    bsrs = [b["bsr"] for b in verified_books if b.get("bsr", 0) > 0]
+    confidence = ("high" if len(per_book) >= 3
+                  else "medium" if (len(per_book) >= 1 or len(sample) >= 2)
+                  else "low")
+
+    avg_reviews = (sum(working) / len(working)) if working else 0.0
+    vulnerable_count = sum(1 for r in working if r < 100)
+    heavy_incumbents = sum(1 for r in working if r > 400)
     avg_bsr = int(sum(bsrs) / len(bsrs)) if bsrs else 250000
 
     kenp_data = calculate_kenp_economics(avg_bsr, target_pages=180)
@@ -240,8 +264,10 @@ def compute_comprehensive_score(books: list[dict], keyword: str = "", demand_ver
         "total": total_score, "demand": demand_pts, "competition": comp_pts, "series": series_pts,
         "avg_reviews": round(avg_reviews, 1), "avg_bsr": avg_bsr,
         "est_daily_sales": kenp_data["daily_borrows"], "kenp_metrics": kenp_data,
-        "verified_count": len(verified), "vulnerable_count": vulnerable_count,
-        "is_ghost_town": False, "saturation_warning": is_saturated, "confidence": confidence,
+        "verified_count": len(per_book) if per_book else len(sample),
+        "vulnerable_count": vulnerable_count,
+        "is_ghost_town": False, "saturation_warning": is_saturated,
+        "confidence": confidence, "evidence_mode": evidence_mode,
     }
 
 # ===========================================================================
@@ -281,7 +307,7 @@ def _fetch_search_page(query: str) -> tuple[str, str]:
     return "", ""
 
 # ===========================================================================
-# LAYOUT-AGNOSTIC RESULT PARSING + MULTI-PROXY PRODUCT EVIDENCE
+# LAYOUT-AGNOSTIC RESULT PARSING
 # ===========================================================================
 ASIN_PATTERN = re.compile(r"(?:/dp/|/gp/product/|/exec/obidos/ASIN/)([A-Z0-9]{10})")
 REV_PATTERN = re.compile(r"(\d[\d,]*)\s*(?:global ratings|ratings|reviews|customer reviews)", re.I)
@@ -296,7 +322,6 @@ BSR_PATTERNS = [
 ]
 
 def _decode_ddg_href(href: str) -> str:
-    """Resolves DuckDuckGo redirect hrefs (uddg=, protocol-relative) to the true destination."""
     if not href:
         return ""
     if href.startswith("//"):
@@ -307,11 +332,7 @@ def _decode_ddg_href(href: str) -> str:
     return urllib.parse.unquote(href)
 
 def _iter_result_pairs(soup):
-    """
-    Yields (snippet_text, destination_url) across ALL known bridge layouts.
-    Strategy A: html bridge containers. Strategy B: lite bridge tables.
-    Strategy C: generic index pairing. No CSS-class assumption can kill all three.
-    """
+    """Yields (snippet_text, destination_url) across all known bridge layouts."""
     containers = soup.find_all("div", class_="result")
     if containers:
         for c in containers:
@@ -335,15 +356,38 @@ def _iter_result_pairs(soup):
         href = links[idx].get("href", "") if idx < len(links) else ""
         yield snip.get_text(separator=" ", strip=True), _decode_ddg_href(href)
 
-READER_PROXIES = [
-    ("jina", lambda u: f"https://r.jina.ai/{u}"),
-    ("allorigins", lambda u: f"https://api.allorigins.win/raw?url={urllib.parse.quote(u, safe='')}"),
-    ("corsproxy", lambda u: f"https://corsproxy.io/?url={urllib.parse.quote(u, safe='')}"),
-]
+# ===========================================================================
+# MULTI-PROVIDER PRODUCT-PAGE EVIDENCE (keyed-first, keyless fallbacks)
+# ===========================================================================
+def _reader_chain() -> list:
+    chain = []
+    sap_key = os.getenv("SCRAPERAPI_KEY")
+    if sap_key:
+        chain.append(("scraperapi",
+                      lambda u: f"http://api.scraperapi.com/?api_key={sap_key}&url={urllib.parse.quote(u, safe='')}",
+                      {"User-Agent": random.choice(USER_AGENTS)}))
+    jina_key = os.getenv("JINA_API_KEY")
+    if jina_key:
+        chain.append(("jina-key",
+                      lambda u: f"https://r.jina.ai/{u}",
+                      {"Authorization": f"Bearer {jina_key}", "User-Agent": "kdp-research-bot"}))
+    chain.append(("codetabs",
+                  lambda u: f"https://api.codetabs.com/v1/proxy/?quest={urllib.parse.quote(u, safe='')}",
+                  {"User-Agent": random.choice(USER_AGENTS)}))
+    chain.append(("jina-anon",
+                  lambda u: f"https://r.jina.ai/{u}",
+                  {"User-Agent": random.choice(USER_AGENTS)}))
+    chain.append(("allorigins",
+                  lambda u: f"https://api.allorigins.win/raw?url={urllib.parse.quote(u, safe='')}",
+                  {"User-Agent": random.choice(USER_AGENTS)}))
+    return chain
 
 _reader_used = 0
 _reader_success = 0
-READER_BUDGET_PER_CYCLE = 4
+
+def reader_budget() -> int:
+    """ScraperAPI free tier is 5k/month: cap attempts at 3/cycle when it is the primary provider."""
+    return 3 if os.getenv("SCRAPERAPI_KEY") else 4
 
 def reset_reader_budget():
     global _reader_used, _reader_success
@@ -351,11 +395,10 @@ def reset_reader_budget():
     _reader_success = 0
 
 def fetch_product_page(asin: str) -> tuple[str, str]:
-    """Tries each reader proxy in order; returns (body, proxy_name) on first usable response."""
     url = f"https://www.amazon.com/dp/{asin}"
-    for name, wrap in READER_PROXIES:
+    for name, build, headers in _reader_chain():
         try:
-            r = requests.get(wrap(url), headers={"User-Agent": random.choice(USER_AGENTS)}, timeout=20)
+            r = requests.get(build(url), headers=headers, timeout=20)
             if r.status_code == 200 and len(r.text) > 500:
                 return r.text, name
         except Exception:
@@ -363,7 +406,6 @@ def fetch_product_page(asin: str) -> tuple[str, str]:
     return "", ""
 
 def enrich_via_reader(books: list[dict], budget: int) -> list[dict]:
-    """Tier-2 evidence: genuine review counts + BSR from real product pages. Never invents."""
     global _reader_used, _reader_success
     for b in books:
         if _reader_used >= budget or b.get("reviews") is not None or not b.get("asin"):
@@ -387,6 +429,36 @@ def enrich_via_reader(books: list[dict], budget: int) -> list[dict]:
         if b.get("reviews") is not None:
             _reader_success += 1
     return books
+
+# ===========================================================================
+# TIER 1.5: CLUSTER-LEVEL REVIEW SAMPLING (keyless unlock)
+# ===========================================================================
+SAMPLE_QUERY_PATTERN = re.compile(r"([\d,]+)\s*(?:global\s+)?(?:ratings|customer\s+reviews|reviews)", re.I)
+
+def probe_cluster_review_sample(keyword: str) -> list[int]:
+    """
+    One ratings-biased bridge query per cold cluster. Returns REAL review counts
+    observed in result snippets, used ONLY as a cluster-level competition sample
+    (never attributed to individual titles).
+    """
+    clean = re.sub(r"[^\w\s]", "", keyword).strip()
+    query = f'amazon {clean} "out of 5 stars" ratings'
+    try:
+        html, _bridge = _fetch_search_page(query)
+        if not html:
+            return []
+        soup = BeautifulSoup(html, "lxml")
+        sample = []
+        for text, _dest in _iter_result_pairs(soup):
+            for m in SAMPLE_QUERY_PATTERN.finditer(text):
+                val = int(m.group(1).replace(",", ""))
+                if 0 < val < 1_000_000:
+                    sample.append(val)
+            if len(sample) >= 6:
+                break
+        return sample[:6]
+    except Exception:
+        return []
 
 def harvest_organic_books(keyword: str, max_items: int = 6) -> list[dict]:
     clean_kw = re.sub(r"[^\w\s]", "", keyword).strip()
@@ -413,11 +485,11 @@ def harvest_organic_books(keyword: str, max_items: int = 6) -> list[dict]:
     return books
 
 # ===========================================================================
-# BUDGET, CACHE (SCHEMA-VERSIONED), TELEMETRY
+# BUDGET, SCHEMA-VERSIONED CACHE, TELEMETRY
 # ===========================================================================
 RADAR_CACHE_FILE = "radar_cache.json"
 CACHE_TTL_SECONDS = 6 * 3600
-CACHE_SCHEMA = 2                    # bump to invalidate stale evidence-poor entries instantly
+CACHE_SCHEMA = 3                    # invalidates all pre-Tier-1.5 poisoned entries instantly
 DDG_POLITE_DELAY = (2.5, 5.0)
 MAX_COLD_SCRAPES_PER_CYCLE = 12
 CYCLE_DEADLINE_SECONDS = 180
@@ -474,13 +546,13 @@ def run_diagnostics() -> dict:
     return out
 
 def run_selftest() -> dict:
-    """
-    Live-probes EVERY evidence tier from the host network and reports per-tier results.
-    This is the ground-truth instrument for 'which tier works on Railway right now'.
-    """
-    out = {"amazon": 0, "ddg_bridge": None, "pairs": 0, "asins": 0,
-           "proxy_results": {}, "error": None}
+    """Live-probes every evidence tier from the host network, per-provider."""
+    out = {"amazon": 0, "amazon2": 0, "ddg_bridge": None, "pairs": 0, "asins": 0,
+           "sample": [], "proxy_results": {}, "keyed_providers": [], "error": None}
     out["amazon"] = len(probe_amazon_suggestions("chair yoga seniors"))
+    out["amazon2"] = len(probe_amazon_suggestions("adhd cleaning"))
+    chain = _reader_chain()
+    out["keyed_providers"] = [n for n, _b, _h in chain if n in ("scraperapi", "jina-key")]
     try:
         html, bridge = _fetch_search_page("amazon kindle chair yoga seniors")
         out["ddg_bridge"] = bridge or "none"
@@ -488,31 +560,28 @@ def run_selftest() -> dict:
             soup = BeautifulSoup(html, "lxml")
             pairs = list(_iter_result_pairs(soup))
             out["pairs"] = len(pairs)
-            asin = None
-            for _text, dest in pairs:
-                m = ASIN_PATTERN.search(dest or "")
-                if m:
-                    asin = m.group(1)
-                    break
             out["asins"] = sum(1 for _t, d in pairs if ASIN_PATTERN.search(d or ""))
+            asin = next((ASIN_PATTERN.search(d).group(1) for _t, d in pairs if ASIN_PATTERN.search(d or "")), None)
             if asin:
-                for name, wrap in READER_PROXIES:
+                for name, build, headers in chain:
                     try:
-                        r = requests.get(wrap(f"https://www.amazon.com/dp/{asin}"),
-                                         headers={"User-Agent": random.choice(USER_AGENTS)}, timeout=20)
+                        r = requests.get(build(f"https://www.amazon.com/dp/{asin}"), headers=headers, timeout=20)
                         ok = r.status_code == 200 and len(r.text) > 500
                         parsed = bool(ok) and any(p.search(r.text) for p in REV_PATTERNS)
                         out["proxy_results"][name] = f"HTTP {r.status_code} len {len(r.text)} parse {'YES' if parsed else 'no'}"
+                        if parsed:
+                            break
                     except Exception as e:
                         out["proxy_results"][name] = f"ERR {type(e).__name__}"
             else:
-                out["proxy_results"]["note"] = "no ASIN found in result set; proxy tier untestable this run"
+                out["proxy_results"]["note"] = "no ASIN in result set"
+        out["sample"] = probe_cluster_review_sample("chair yoga seniors")
     except ScraperBlockedException as e:
         out["error"] = str(e)
     return out
 
 # ===========================================================================
-# BLUEPRINT GENERATOR
+# BLUEPRINT GENERATOR (state-immutable, demographic-aware)
 # ===========================================================================
 def generate_research_blueprint(keyword: str, existing_metrics: dict = None,
                                 cached_summary: str = None) -> tuple[dict, str, str]:
@@ -541,7 +610,7 @@ You are an elite Kindle Unlimited acquisitions editor and quantitative non-ficti
 <context>
 Non-fiction search query: "{keyword}"
 - Viability Score: {score}/100 (Demand {metrics['demand']}/35, Competition {metrics['competition']}/35, Series {metrics['series']}/30)
-- Data confidence: {metrics['confidence']}
+- Data confidence: {metrics['confidence']} (mode: {metrics['evidence_mode']})
 - Average competitor reviews: {metrics['avg_reviews']}
 - Estimated Kindle BSR: #{metrics['avg_bsr']:,}
 - Projected daily borrows: ~{kenp['daily_borrows']}
@@ -659,9 +728,17 @@ def scan_niche_radar() -> dict:
                 target_query = verified_q[0] if verified_q else (queries[0]["query"] if queries else cluster)
                 time.sleep(random.uniform(*DDG_POLITE_DELAY))
                 books = harvest_organic_books(target_query, max_items=6)
-                books = enrich_via_reader(books, READER_BUDGET_PER_CYCLE)
+                books = enrich_via_reader(books, reader_budget())
                 demand_verified = bool(verified_q)
                 metrics = compute_comprehensive_score(books, target_query, demand_verified=demand_verified)
+                if metrics.get("confidence") == "low":
+                    sample = probe_cluster_review_sample(target_query)
+                    if sample:
+                        metrics = compute_comprehensive_score(
+                            books, target_query,
+                            demand_verified=demand_verified,
+                            review_sample=sample,
+                        )
                 comp_summary = "\n".join(
                     f"- {b['title']} | Reviews: {b['reviews'] if b['reviews'] is not None else 'Unverified'} "
                     f"| Est BSR: #{b['bsr']:,} | Evidence: {b['evidence']}"
@@ -699,6 +776,7 @@ def scan_niche_radar() -> dict:
                     "est_series_kenp": metrics["kenp_metrics"]["monthly_series_ecosystem"],
                     "avg_bsr": metrics["avg_bsr"],
                     "confidence": metrics["confidence"],
+                    "evidence_mode": metrics.get("evidence_mode", "none"),
                     "amazon_url": f"https://www.amazon.com/s?k={urllib.parse.quote_plus(target_query)}&i=digital-text",
                     "raw_metrics": metrics,
                     "comp_summary": comp_summary,
