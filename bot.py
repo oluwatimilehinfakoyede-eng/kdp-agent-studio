@@ -76,9 +76,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_msg = (
         "🚀 *KDP Agent Studio Pro — High-Yield Discovery Engine Active*\n\n"
         "*Available Commands:*\n"
-        "• `/scout <topic>` — Deconstruct & verify commercial search queries\n"
+        "• `/scout <topic>` — Deconstruct & verify commercial 2-to-4 word search queries\n"
         "• `/research <query>` — Pull market data, score, & generate full asset package\n"
-        "• `/radar` — Trigger an immediate sweep of evergreen non-fiction niches\n\n"
+        "• `/radar` — Trigger an immediate sweep of verified evergreen non-fiction niches\n\n"
         "📡 *24/7 Autonomous Radar:* LOCKED ON. Your chat is registered.\n"
         "The agent sweeps high-converting micro-clusters every *30 minutes* and pings you whenever a genuine *≥ 80/100* opportunity is detected."
     )
@@ -86,9 +86,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def scout(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Generates 6 verified buyer search queries."""
+    """Generates clean 2-to-4 word verified buyer queries."""
     if not context.args:
-        await update.message.reply_text("Usage: `/scout <topic>`\nExample: `/scout low oxalate cookbook`", parse_mode="Markdown")
+        await update.message.reply_text("Usage: `/scout <topic>`\nExample: `/scout low oxalate diet`", parse_mode="Markdown")
         return
 
     broad_topic = " ".join(context.args)
@@ -118,16 +118,19 @@ async def scout(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text(f"❌ Scout error: {e}")
 
 
-async def handle_research_execution(query: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Executes market analysis and uploads the markdown asset package."""
+async def handle_research_execution(query: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE, cached_metrics: dict = None):
+    """
+    Executes market analysis and uploads the markdown asset package.
+    Uses cached metrics when available to maintain data consistency.
+    """
     status_msg = await context.bot.send_message(
         chat_id=chat_id,
-        text=f"📊 Harvesting Kindle metrics & generating asset package for:\n*{query}*...",
+        text=f"📊 Compiling Kindle metrics & generating asset package for:\n*{query}*...",
         parse_mode="Markdown"
     )
 
     try:
-        metrics, blueprint = await asyncio.to_thread(generate_research_blueprint, query)
+        metrics, blueprint = await asyncio.to_thread(generate_research_blueprint, query, cached_metrics)
 
         summary_card = (
             f"📈 *KDP Opportunity Report: {query}*\n\n"
@@ -138,7 +141,7 @@ async def handle_research_execution(query: str, chat_id: int, context: ContextTy
             f"• *Est. Competitor Avg BSR:* #{metrics['avg_bsr']:,}\n"
             f"• *Est. Daily Borrows Velocity:* ~{metrics['est_daily_sales']} borrows/day\n"
             f"• *Top-Ranked Indie Books:* {metrics['indie_count']}\n"
-            f"• *Avg Reviews (Top 7):* {metrics['avg_reviews']}\n\n"
+            f"• *Avg Reviews:* {metrics['avg_reviews']}\n\n"
             f"📁 *Complete Production Package Attached Below:*"
         )
         await status_msg.edit_text(summary_card, parse_mode="Markdown")
@@ -167,7 +170,7 @@ async def research(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles Scout and Radar inline callbacks."""
+    """Handles Scout and Radar inline callbacks with metric caching."""
     query = update.callback_query
     await query.answer()
 
@@ -176,18 +179,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if prefix == "rad":
         search_query = context.user_data.get(f"rad_{index}")
+        cached_metrics = context.user_data.get(f"rad_metrics_{index}")
     else:
         search_query = context.user_data.get(f"q_{index}")
+        cached_metrics = None
 
     if search_query:
-        await handle_research_execution(search_query, query.message.chat_id, context)
+        await handle_research_execution(search_query, query.message.chat_id, context, cached_metrics=cached_metrics)
     else:
         await query.message.reply_text("Session expired. Please trigger the command again.")
 
 
 async def radar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """On-demand radar execution."""
-    status_msg = await update.message.reply_text("📡 *Sweeping verified micro-niche clusters (≥ 80/100 threshold)...*", parse_mode="Markdown")
+    """On-demand radar execution with metric caching."""
+    status_msg = await update.message.reply_text("📡 *Sweeping verified evergreen clusters (≥ 80/100 threshold)...*", parse_mode="Markdown")
     try:
         alerts = await asyncio.to_thread(scan_niche_radar)
         if not alerts:
@@ -205,6 +210,8 @@ async def radar(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"   • *Est. 3-Book Ecosystem:* ~${a['est_series_kenp']}/mo\n"
             )
             context.user_data[f"rad_{i}"] = a["topic"]
+            context.user_data[f"rad_metrics_{i}"] = a["raw_metrics"]
+
             keyboard.append([
                 InlineKeyboardButton(f"📊 Blueprint: {a['topic'][:24]}...", callback_data=f"rad_{i}"),
                 InlineKeyboardButton("🛒 Amazon Live", url=a["amazon_url"])
