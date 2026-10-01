@@ -17,6 +17,7 @@ from agents import (
     generate_research_blueprint,
     scan_niche_radar,
     run_diagnostics,
+    get_last_radar,
 )
 
 load_dotenv()
@@ -189,65 +190,81 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def radar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if SWEEP_LOCK.locked():
-        await update.message.reply_text("⏳ A sweep is already running (manual or background). Try again shortly.")
+    status_msg = await update.message.reply_text("📡 Sweeping verified evergreen clusters (≥ 80/100 threshold)...", parse_mode="Markdown")
+
+    # Non-blocking acquire: never make the user wait on a running sweep
+    try:
+        acquired = await asyncio.wait_for(SWEEP_LOCK.acquire(), timeout=2.0)
+    except asyncio.TimeoutError:
+        acquired = False
+
+    if not acquired:
+        lr = get_last_radar()
+        status_clean = str(lr["status"]).replace("_", " ")
+        topic_clean = str(lr["best_topic"]).replace("_", " ")
+        await status_msg.edit_text(
+            "⏳ A sweep is already in progress (24/7 job or another manual run).\n"
+            f"Last completed sweep: status {status_clean} | best {lr['best_score']}/100 ({topic_clean}).\n"
+            "Sweeps are bounded to ~3 minutes. Retry shortly, or wait for the automatic alert if the running sweep hits ≥80/100.",
+            parse_mode="Markdown",
+        )
         return
 
-    status_msg = await update.message.reply_text("📡 Sweeping verified evergreen clusters (≥ 80/100 threshold)...", parse_mode="Markdown")
-    async with SWEEP_LOCK:
-        try:
-            result = await asyncio.to_thread(scan_niche_radar)
-            alerts = result["alerts"]
+    try:
+        result = await asyncio.to_thread(scan_niche_radar)
+        alerts = result["alerts"]
 
-            if result["status"] == "ip_blocked":
-                await status_msg.edit_text(
-                    "🚧 *Sweep aborted — egress IP reputation block.*\n"
-                    f"Detail: {result['detail']}\n"
-                    f"Clusters scanned before abort: {result['scanned']}. Cached verdicts remain usable.\n"
-                    "The 24/7 job retries next cycle with polite backoff. Run /diag for bridge health.",
-                    parse_mode="Markdown",
-                )
-                return
+        if result["status"] == "ip_blocked":
+            await status_msg.edit_text(
+                "🚧 *Sweep aborted — egress IP reputation block.*\n"
+                f"Detail: {result['detail']}\n"
+                f"Clusters scanned before abort: {result['scanned']}. Cached verdicts remain usable.\n"
+                "The 24/7 job retries next cycle with polite backoff. Run /diag for bridge health.",
+                parse_mode="Markdown",
+            )
+            return
 
-            if result["status"] == "budget_deferred":
-                await status_msg.edit_text(
-                    "📡 *Partial sweep — request budget reached (IP protection).*\n"
-                    f"Clusters evaluated: {result['scanned']} | Best: *{result['best_score']}/100* (`{result['best_topic']}`)\n"
-                    "Remaining clusters defer to the next cycle. No niches cleared 80/100 yet.",
-                    parse_mode="Markdown",
-                )
-                return
+        if result["status"] == "budget_deferred":
+            await status_msg.edit_text(
+                "📡 *Partial sweep — request budget or time deadline reached (IP protection).*\n"
+                f"Clusters evaluated: {result['scanned']} | Best: *{result['best_score']}/100* (`{result['best_topic']}`)\n"
+                "Remaining clusters defer to the next cycle. No niches cleared 80/100 yet.",
+                parse_mode="Markdown",
+            )
+            return
 
-            if not alerts:
-                await status_msg.edit_text(
-                    "📡 *Sweep complete — bridges healthy, no IP issues.*\n"
-                    f"Clusters evaluated: {result['scanned']} (cold scrapes: {result['cold_scrapes']})\n"
-                    f"Best score this pass: *{result['best_score']}/100* (`{result['best_topic']}`)\n"
-                    "Nothing cleared the 80/100 threshold. This is a market verdict, not a scraper failure.",
-                    parse_mode="Markdown",
-                )
-                return
+        if not alerts:
+            await status_msg.edit_text(
+                "📡 *Sweep complete — bridges healthy, no IP issues.*\n"
+                f"Clusters evaluated: {result['scanned']} (cold scrapes: {result['cold_scrapes']})\n"
+                f"Best score this pass: *{result['best_score']}/100* (`{result['best_topic']}`)\n"
+                "Nothing cleared the 80/100 threshold. This is a market verdict, not a scraper failure.",
+                parse_mode="Markdown",
+            )
+            return
 
-            lines = ["🚨 *High-Opportunity Niches Detected by Radar (≥ 80/100):*\n"]
-            keyboard = []
-            for i, a in enumerate(alerts, 1):
-                lines.append(
-                    f"{i}. *{a['topic']}*\n"
-                    f"   • *Score:* {a['score']}/100 | *Confidence:* {a['confidence']} | *Est. BSR:* #{a['avg_bsr']:,} (~{a['est_borrows']} borrows/day)\n"
-                    f"   • *Reviews:* {a['avg_reviews']} | *Vulnerable Competitors:* {a['vulnerable_count']}\n"
-                    f"   • *Est. Single Book Royalty:* ~${a['est_monthly_kenp']}/mo\n"
-                    f"   • *Est. 3-Book Ecosystem:* ~${a['est_series_kenp']}/mo\n"
-                )
-                context.user_data[f"rad_{i}"] = a["topic"]
-                context.user_data[f"rad_metrics_{i}"] = a["raw_metrics"]
-                context.user_data[f"rad_summary_{i}"] = a["comp_summary"]
-                keyboard.append([
-                    InlineKeyboardButton(f"📊 Blueprint: {a['topic'][:24]}...", callback_data=f"rad_{i}"),
-                    InlineKeyboardButton("🛒 Amazon Live", url=a["amazon_url"]),
-                ])
-            await status_msg.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-        except Exception as e:
-            await status_msg.edit_text(f"❌ Radar sweep error: {e}")
+        lines = ["🚨 *High-Opportunity Niches Detected by Radar (≥ 80/100):*\n"]
+        keyboard = []
+        for i, a in enumerate(alerts, 1):
+            lines.append(
+                f"{i}. *{a['topic']}*\n"
+                f"   • *Score:* {a['score']}/100 | *Confidence:* {a['confidence']} | *Est. BSR:* #{a['avg_bsr']:,} (~{a['est_borrows']} borrows/day)\n"
+                f"   • *Reviews:* {a['avg_reviews']} | *Vulnerable Competitors:* {a['vulnerable_count']}\n"
+                f"   • *Est. Single Book Royalty:* ~${a['est_monthly_kenp']}/mo\n"
+                f"   • *Est. 3-Book Ecosystem:* ~${a['est_series_kenp']}/mo\n"
+            )
+            context.user_data[f"rad_{i}"] = a["topic"]
+            context.user_data[f"rad_metrics_{i}"] = a["raw_metrics"]
+            context.user_data[f"rad_summary_{i}"] = a["comp_summary"]
+            keyboard.append([
+                InlineKeyboardButton(f"📊 Blueprint: {a['topic'][:24]}...", callback_data=f"rad_{i}"),
+                InlineKeyboardButton("🛒 Amazon Live", url=a["amazon_url"]),
+            ])
+        await status_msg.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Radar sweep error: {e}")
+    finally:
+        SWEEP_LOCK.release()
 
 async def diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🩺 Probing bridges and egress reputation...")
@@ -277,40 +294,48 @@ async def diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------------------
 async def radar_background_job(context: ContextTypes.DEFAULT_TYPE):
     subscribers = load_subscribers()
-    if not subscribers or SWEEP_LOCK.locked():
+    if not subscribers:
         return
 
-    async with SWEEP_LOCK:
-        try:
-            result = await asyncio.to_thread(scan_niche_radar)
-            print(f"[radar-job] status={result['status']} scanned={result['scanned']} "
-                  f"cold={result['cold_scrapes']} best={result['best_score']} ({result['best_topic']})")
+    # Non-blocking: if a manual sweep owns the lock, skip this cycle entirely
+    try:
+        acquired = await asyncio.wait_for(SWEEP_LOCK.acquire(), timeout=1.0)
+    except asyncio.TimeoutError:
+        print("[radar-job] skipped: manual sweep in progress")
+        return
 
-            for a in result["alerts"]:
-                topic_key = a["topic"].strip().lower()
-                if topic_key in load_alerts_cache():
-                    continue
-                cache_alert(topic_key)
-                alert_text = (
-                    f"🚨 *24/7 Autonomous Radar Alert — Gold Nugget Detected!*\n\n"
-                    f"• *Topic:* `{a['topic']}`\n"
-                    f"• *Viability Score:* *{a['score']}/100* (confidence: {a['confidence']})\n"
-                    f"• *Est. Borrows Velocity:* ~{a['est_borrows']} borrows/day\n"
-                    f"• *Est. Competitor BSR:* #{a['avg_bsr']:,}\n"
-                    f"• *Est. Single Book Royalty:* ~${a['est_monthly_kenp']}/mo\n"
-                    f"• *Est. 3-Book Ecosystem:* ~${a['est_series_kenp']}/mo\n"
-                    f"• *Average Reviews:* {a['avg_reviews']} ({a['vulnerable_count']} vulnerable)\n\n"
-                    f"👉 Run `/research {a['topic']}` to generate the publishing asset package."
-                )
-                keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🛒 View on Amazon Live", url=a["amazon_url"])]])
-                for chat_id in subscribers:
-                    try:
-                        await context.bot.send_message(chat_id=chat_id, text=alert_text,
-                                                       reply_markup=keyboard, parse_mode="Markdown")
-                    except Exception as send_err:
-                        print(f"Could not dispatch alert to chat {chat_id}: {send_err}")
-        except Exception as e:
-            print(f"Autonomous 24/7 background radar notice: {e}")
+    try:
+        result = await asyncio.to_thread(scan_niche_radar)
+        print(f"[radar-job] status={result['status']} scanned={result['scanned']} "
+              f"cold={result['cold_scrapes']} best={result['best_score']} ({result['best_topic']})")
+
+        for a in result["alerts"]:
+            topic_key = a["topic"].strip().lower()
+            if topic_key in load_alerts_cache():
+                continue
+            cache_alert(topic_key)
+            alert_text = (
+                f"🚨 *24/7 Autonomous Radar Alert — Gold Nugget Detected!*\n\n"
+                f"• *Topic:* `{a['topic']}`\n"
+                f"• *Viability Score:* *{a['score']}/100* (confidence: {a['confidence']})\n"
+                f"• *Est. Borrows Velocity:* ~{a['est_borrows']} borrows/day\n"
+                f"• *Est. Competitor BSR:* #{a['avg_bsr']:,}\n"
+                f"• *Est. Single Book Royalty:* ~${a['est_monthly_kenp']}/mo\n"
+                f"• *Est. 3-Book Ecosystem:* ~${a['est_series_kenp']}/mo\n"
+                f"• *Average Reviews:* {a['avg_reviews']} ({a['vulnerable_count']} vulnerable)\n\n"
+                f"👉 Run `/research {a['topic']}` to generate the publishing asset package."
+            )
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🛒 View on Amazon Live", url=a["amazon_url"])]])
+            for chat_id in subscribers:
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text=alert_text,
+                                                   reply_markup=keyboard, parse_mode="Markdown")
+                except Exception as send_err:
+                    print(f"Could not dispatch alert to chat {chat_id}: {send_err}")
+    except Exception as e:
+        print(f"Autonomous 24/7 background radar notice: {e}")
+    finally:
+        SWEEP_LOCK.release()
 
 # ---------------------------------------------------------------------------
 # BOOTSTRAP
