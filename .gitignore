@@ -1,5 +1,11 @@
 .env
 venv/
 __pycache__/
+*.pyc
 *.txt
 !requirements.txt
+
+# Runtime state files (regenerated automatically; never commit)
+subscribers.json
+alerts_cache.json
+radar_cache.json
