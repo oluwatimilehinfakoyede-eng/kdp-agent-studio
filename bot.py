@@ -74,7 +74,7 @@ def _evidence_line(result: dict) -> str:
     if result.get("verified_clusters", 0) == 0:
         line += "\n⚠️ Evidence gap: no review counts retrievable this pass — scores capped at the evidence floor BY DESIGN. Run /selftest to probe each evidence tier live."
     elif result.get("saturated_count", 0) > 0:
-        line += "\nℹ️ Saturated = real demand but review moats too deep. Those are correct rejections, not failures."
+        line += "\nℹ️ Saturated = real demand but zero vulnerable competitors (no crack in the moat). Correct rejections, not failures."
     return line
 
 # ---------------------------------------------------------------------------
@@ -135,6 +135,8 @@ async def handle_research_execution(query: str, chat_id: int, context: ContextTy
         metrics, blueprint, _summary = await asyncio.to_thread(
             generate_research_blueprint, query, cached_metrics, cached_summary
         )
+        entry_bar = metrics.get("entry_bar")
+        entry_txt = f"{entry_bar} reviews" if entry_bar is not None else "n/a (no verified evidence)"
 
         summary_card = (
             f"📈 *KDP Opportunity Report: {query}*\n\n"
@@ -144,6 +146,7 @@ async def handle_research_execution(query: str, chat_id: int, context: ContextTy
             f"  - Series Potential: {metrics['series']}/30\n"
             f"• *Evidence Confidence:* {metrics['confidence']}\n"
             f"• *Evidence Mode:* {metrics.get('evidence_mode', 'unknown')}\n"
+            f"• *Entry Bar (weakest ranking competitor):* {entry_txt}\n"
             f"• *Verified Review Evidence:* {metrics['verified_count']} listings\n"
             f"• *Est. Competitor Avg BSR:* #{metrics['avg_bsr']:,}\n"
             f"• *Est. Daily Borrows Velocity:* ~{metrics['est_daily_sales']} borrows/day\n"
@@ -262,11 +265,12 @@ async def radar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = ["🚨 *High-Opportunity Niches Detected by Radar (≥ 80/100):*\n"]
         keyboard = []
         for i, a in enumerate(alerts, 1):
+            entry_txt = f"{a['entry_bar']} reviews" if a.get("entry_bar") is not None else "n/a"
             lines.append(
                 f"{i}. *{a['topic']}*\n"
                 f"   • *Score:* {a['score']}/100 | *Confidence:* {a['confidence']} | *Evidence:* {a.get('evidence_mode', 'none')}\n"
                 f"   • *Est. BSR:* #{a['avg_bsr']:,} (~{a['est_borrows']} borrows/day)\n"
-                f"   • *Reviews:* {a['avg_reviews']} | *Vulnerable Competitors:* {a['vulnerable_count']}\n"
+                f"   • *Entry Bar:* {entry_txt} | *Vulnerable Competitors:* {a['vulnerable_count']}\n"
                 f"   • *Est. Single Book Royalty:* ~${a['est_monthly_kenp']}/mo\n"
                 f"   • *Est. 3-Book Ecosystem:* ~${a['est_series_kenp']}/mo\n"
             )
@@ -355,15 +359,17 @@ async def radar_background_job(context: ContextTypes.DEFAULT_TYPE):
             if topic_key in load_alerts_cache():
                 continue
             cache_alert(topic_key)
+            entry_txt = f"{a['entry_bar']} reviews" if a.get("entry_bar") is not None else "n/a"
             alert_text = (
                 f"🚨 *24/7 Autonomous Radar Alert — Gold Nugget Detected!*\n\n"
                 f"• *Topic:* `{a['topic']}`\n"
                 f"• *Viability Score:* *{a['score']}/100* (confidence: {a['confidence']}, evidence: {a.get('evidence_mode', 'none')})\n"
                 f"• *Est. Borrows Velocity:* ~{a['est_borrows']} borrows/day\n"
                 f"• *Est. Competitor BSR:* #{a['avg_bsr']:,}\n"
+                f"• *Entry Bar:* {entry_txt} | *Vulnerable:* {a['vulnerable_count']}\n"
                 f"• *Est. Single Book Royalty:* ~${a['est_monthly_kenp']}/mo\n"
                 f"• *Est. 3-Book Ecosystem:* ~${a['est_series_kenp']}/mo\n"
-                f"• *Average Reviews:* {a['avg_reviews']} ({a['vulnerable_count']} vulnerable)\n\n"
+                f"• *Average Reviews:* {a['avg_reviews']}\n\n"
                 f"👉 Run `/research {a['topic']}` to generate the publishing asset package."
             )
             keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🛒 View on Amazon Live", url=a["amazon_url"])]])
