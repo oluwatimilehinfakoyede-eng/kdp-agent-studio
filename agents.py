@@ -190,11 +190,10 @@ def calculate_kenp_economics(bsr: int, target_pages: int = 180) -> dict:
 def compute_comprehensive_score(books: list[dict], keyword: str = "", demand_verified: bool = False,
                                 review_sample: list[int] = None) -> dict:
     """
-    100-point viability scoring with a three-tier evidence model:
-      per-book        : review counts parsed from individual listings (strongest)
-      cluster-sample  : review counts parsed from ratings-biased snippets (sample-level)
-      none            : no review evidence -> scores capped at the evidence floor
-    No synthetic numbers are ever introduced.
+    100-point viability scoring with a three-tier evidence model.
+    Competition is keyed to the ENTRY BAR (weakest ranking competitor) — the review
+    count a new 0-review book must displace — per KDP business rules.
+    Saturation means 'no crack in the moat', not 'a legacy incumbent exists'.
     """
     if not books or len(books) < 2:
         kenp_data = calculate_kenp_economics(220000)
@@ -203,7 +202,7 @@ def compute_comprehensive_score(books: list[dict], keyword: str = "", demand_ver
             "avg_reviews": 0.0, "avg_bsr": 220000, "est_daily_sales": 1,
             "kenp_metrics": kenp_data, "verified_count": 0, "vulnerable_count": 0,
             "is_ghost_town": True, "saturation_warning": False,
-            "confidence": "low", "evidence_mode": "none",
+            "confidence": "low", "evidence_mode": "none", "entry_bar": None,
         }
 
     verified_books = [b for b in books if b.get("reviews") is not None]
@@ -228,6 +227,7 @@ def compute_comprehensive_score(books: list[dict], keyword: str = "", demand_ver
                   else "low")
 
     avg_reviews = (sum(working) / len(working)) if working else 0.0
+    entry_bar = min(working) if working else None
     vulnerable_count = sum(1 for r in working if r < 100)
     heavy_incumbents = sum(1 for r in working if r > 400)
     avg_bsr = int(sum(bsrs) / len(bsrs)) if bsrs else 250000
@@ -241,13 +241,14 @@ def compute_comprehensive_score(books: list[dict], keyword: str = "", demand_ver
     else: demand_pts = 6
 
     comp_pts = 5
-    if confidence != "low":
-        if avg_reviews < 60: comp_pts += 18
-        elif avg_reviews < 140: comp_pts += 12
-        elif avg_reviews < 280: comp_pts += 5
+    if confidence != "low" and entry_bar is not None:
+        if entry_bar < 60: comp_pts += 18
+        elif entry_bar < 140: comp_pts += 12
+        elif entry_bar < 280: comp_pts += 5
         if vulnerable_count >= 3: comp_pts += 12
         elif vulnerable_count >= 1: comp_pts += 6
-        if heavy_incumbents >= 2: comp_pts = max(4, comp_pts - 12)
+        if heavy_incumbents >= 2 and vulnerable_count == 0:
+            comp_pts = max(4, comp_pts - 12)
     comp_pts = min(comp_pts, 35)
 
     series_pts = 10
@@ -260,7 +261,8 @@ def compute_comprehensive_score(books: list[dict], keyword: str = "", demand_ver
     series_pts = min(series_pts, 30)
 
     total_score = demand_pts + comp_pts + series_pts
-    is_saturated = heavy_incumbents >= 3 or (confidence != "low" and avg_reviews > 350)
+    is_saturated = (heavy_incumbents >= 3
+                    or (confidence != "low" and vulnerable_count == 0 and (entry_bar or 0) > 350))
     if is_saturated:
         total_score = min(total_score, 65)
 
@@ -271,7 +273,7 @@ def compute_comprehensive_score(books: list[dict], keyword: str = "", demand_ver
         "verified_count": len(per_book) if per_book else len(sample),
         "vulnerable_count": vulnerable_count,
         "is_ghost_town": False, "saturation_warning": is_saturated,
-        "confidence": confidence, "evidence_mode": evidence_mode,
+        "confidence": confidence, "evidence_mode": evidence_mode, "entry_bar": entry_bar,
     }
 
 # ===========================================================================
@@ -418,8 +420,8 @@ def fetch_product_page(asin: str) -> tuple[str, str]:
 
 def enrich_via_reader(books: list[dict], budget: int, target_verified: int = 2) -> list[dict]:
     """
-    Tier-2 evidence with a per-cluster quorum: stop at `target_verified` verified
-    listings so the global budget spreads across as many clusters as possible.
+    Tier-2 evidence with a per-cluster quorum and a 1.2 s inter-fetch delay
+    (lifts Jina free-tier success from ~50% toward ~90%).
     """
     global _reader_used, _reader_success
     local_verified = sum(1 for b in books if b.get("reviews") is not None)
@@ -428,6 +430,7 @@ def enrich_via_reader(books: list[dict], budget: int, target_verified: int = 2) 
             break
         if b.get("reviews") is not None or not b.get("asin"):
             continue
+        time.sleep(1.2)  # RPM politeness between authenticated reader fetches
         _reader_used += 1
         body, proxy = fetch_product_page(b["asin"])
         if not body:
@@ -507,9 +510,9 @@ def harvest_organic_books(keyword: str, max_items: int = 6) -> list[dict]:
 # ===========================================================================
 RADAR_CACHE_FILE = "radar_cache.json"
 CACHE_TTL_SECONDS = 6 * 3600
-CACHE_TTL_EVIDENCE_GAP_SECONDS = 45 * 60   # evidence-poor verdicts retry next cycles, not in 6h
+CACHE_TTL_EVIDENCE_GAP_SECONDS = 45 * 60   # evidence-poor / un-deepened verdicts retry soon
 SCOUT_CACHE_TTL_SECONDS = 24 * 3600        # query angles are stable for a day
-CACHE_SCHEMA = 3
+CACHE_SCHEMA = 4                           # invalidates all pre-calibration verdicts on deploy
 DDG_POLITE_DELAY = (2.5, 5.0)
 MAX_COLD_SCRAPES_PER_CYCLE = 12
 CYCLE_DEADLINE_SECONDS = 180
@@ -528,13 +531,18 @@ def _cache_load() -> dict:
     return {}
 
 def _cache_get(key: str):
-    """Confidence-aware TTL: evidence gaps expire in 45 min; verified verdicts persist 6 h."""
+    """
+    TTL policy: high-confidence verdicts and deepened medium verdicts persist 6 h;
+    low-confidence and un-deepened medium verdicts retry after 45 minutes so the
+    reader budget converges and deepens exactly where it can flip an alert.
+    """
     entry = _cache_load().get(key)
     if not entry or entry.get("schema") != CACHE_SCHEMA:
         return None
     age = time.time() - entry.get("ts", 0)
     confidence = (entry.get("metrics") or {}).get("confidence", "low")
-    ttl = CACHE_TTL_SECONDS if confidence != "low" else CACHE_TTL_EVIDENCE_GAP_SECONDS
+    terminal = confidence == "high" or (confidence == "medium" and entry.get("deep_tried"))
+    ttl = CACHE_TTL_SECONDS if terminal else CACHE_TTL_EVIDENCE_GAP_SECONDS
     return entry if age < ttl else None
 
 def _cache_set(key: str, payload: dict):
@@ -634,6 +642,8 @@ def generate_research_blueprint(keyword: str, existing_metrics: dict = None,
     score = metrics["total"]
     kenp = metrics["kenp_metrics"]
     demographic_context = get_demographic_context(keyword)
+    entry_bar = metrics.get("entry_bar")
+    entry_txt = f"{entry_bar} reviews" if entry_bar is not None else "n/a"
 
     prompt = f"""
 <role>
@@ -644,6 +654,7 @@ You are an elite Kindle Unlimited acquisitions editor and quantitative non-ficti
 Non-fiction search query: "{keyword}"
 - Viability Score: {score}/100 (Demand {metrics['demand']}/35, Competition {metrics['competition']}/35, Series {metrics['series']}/30)
 - Data confidence: {metrics['confidence']} (mode: {metrics['evidence_mode']})
+- Entry bar (weakest ranking competitor): {entry_txt}
 - Average competitor reviews: {metrics['avg_reviews']}
 - Estimated Kindle BSR: #{metrics['avg_bsr']:,}
 - Projected daily borrows: ~{kenp['daily_borrows']}
@@ -752,6 +763,7 @@ def scan_niche_radar() -> dict:
                 metrics = cached["metrics"]
                 comp_summary = cached["comp_summary"]
                 demand_verified = cached.get("demand_verified", False)
+                deep_tried = cached.get("deep_tried", False)
             else:
                 if cold_scrapes >= MAX_COLD_SCRAPES_PER_CYCLE:
                     status = "budget_deferred"
@@ -779,6 +791,13 @@ def scan_niche_radar() -> dict:
                             demand_verified=demand_verified,
                             review_sample=sample,
                         )
+                # Score-gated deepening: spend a 3rd fetch only where high
+                # confidence could flip an alert (medium + >=70).
+                deep_tried = False
+                if metrics.get("confidence") == "medium" and metrics["total"] >= 70:
+                    books = enrich_via_reader(books, reader_budget(), target_verified=3)
+                    metrics = compute_comprehensive_score(books, target_query, demand_verified=demand_verified)
+                    deep_tried = True
                 comp_summary = "\n".join(
                     f"- {b['title']} | Reviews: {b['reviews'] if b['reviews'] is not None else 'Unverified'} "
                     f"| Est BSR: #{b['bsr']:,} | Evidence: {b['evidence']}"
@@ -790,6 +809,7 @@ def scan_niche_radar() -> dict:
                     "metrics": metrics,
                     "comp_summary": comp_summary,
                     "demand_verified": demand_verified,
+                    "deep_tried": deep_tried,
                 })
                 cold_scrapes += 1
 
@@ -812,6 +832,7 @@ def scan_niche_radar() -> dict:
                     "competition": metrics["competition"],
                     "series": metrics["series"],
                     "avg_reviews": metrics["avg_reviews"],
+                    "entry_bar": metrics.get("entry_bar"),
                     "vulnerable_count": metrics["vulnerable_count"],
                     "est_borrows": metrics["est_daily_sales"],
                     "est_monthly_kenp": metrics["kenp_metrics"]["monthly_single"],
